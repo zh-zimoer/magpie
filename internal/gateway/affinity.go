@@ -1391,11 +1391,20 @@ func withoutKinds(body []byte, kinds ...string) ([]byte, bool) {
 // conversation uncached, and within a turn may refuse the reasoning the
 // first sealed; a moment's wait costs far less. Strict needs none of it:
 // its one is the last left, asked again as the last one is.
+//
+// A refusal the vendor marked a hard window (noMoreRetry: x-retry-metadata
+// NO_MORE_RETRY, a Retry-After of minutes) is not gone a moment later —
+// every ask inside the window is refused alike, so the kept one moves at
+// once and pays the uncached send, rather than adding one sure 529 to the
+// log a second on (a 305s window left 27 such tries in an hour).
 func keptAgain(aff *Affinity, c candidate, hw *holdWriter, asked bool) (time.Duration, bool) {
 	if asked || aff == nil || !aff.Kept || aff.Why == "strict" || c.rest != aff.Last {
 		return 0, false
 	}
 	if !hw.failed() || hw.turnedAway || hw.refused || hw.code() == http.StatusTooManyRequests || !busy(hw.code(), hw.errBody()) {
+		return 0, false
+	}
+	if noMoreRetry(hw.header, hw.errBody()) {
 		return 0, false
 	}
 	return passing(hw.code(), hw.header, hw.errBody(), 0)

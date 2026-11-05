@@ -145,8 +145,7 @@ func TestRestPerModelOverloadsNeverEscalate(t *testing.T) {
 // A hard window the vendor named (x-retry-metadata: NO_MORE_RETRY) holds
 // the overload's rest to it, up to overloadHardRestMost: resting a minute
 // asks again into a sure refusal, a dozen times over the episode.
-func TestOverloadNoMoreRetryHoldsTheWindow(t *testing.T) {
-	forgetRests(t)
+func TestOverloadNoMoreRetryHoldsTheWindow(t *testing.T) {	forgetRests(t)
 	s := &Server{}
 	c := restPerModelCandidate("gpt-6-astra", false) // the switch is the bulkhead's; this is every provider's
 	over := []byte(`{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","headers":{"x-retry-metadata":"NO_MORE_RETRY","retry-after":"301"},"message":"Our servers are currently overloaded. Please try again later."}}`)
@@ -177,5 +176,47 @@ func TestOverloadNoMoreRetryHoldsTheWindow(t *testing.T) {
 	r3 := s.restAfter(c, 529, h3, over)
 	if d := time.Until(r3.Until); d > 7*time.Second || d < 4*time.Second {
 		t.Fatalf("a 6s window rests %v", d.Round(time.Second))
+	}
+}
+
+// keptAgain, the retry that keeps a conversation on the key its vendor
+// cached it with, doesn't retry into a hard window the vendor named
+// (x-retry-metadata: NO_MORE_RETRY): every ask inside the window is
+// refused alike, so it moves at once. A plain overload (retry-after of
+// seconds) is still asked once more, as before.
+func TestKeptAgainSkipsNoMoreRetry(t *testing.T) {
+	aff := &Affinity{Kept: true, Last: "codex"}
+	c := candidate{rest: "codex"}
+	hw := func(status int, header http.Header, body string) *holdWriter {
+		h := &holdWriter{header: header, status: status}
+		h.held.WriteString(body)
+		return h
+	}
+	nmr := `{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","headers":{"x-retry-metadata":"NO_MORE_RETRY","retry-after":"305"},"message":"Our servers are currently overloaded. Please try again later."}}`
+	plain := `{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`
+
+	// a hard window: not asked again
+	h1 := hw(529, http.Header{}, nmr)
+	if d, ok := keptAgain(aff, c, h1, false); ok {
+		t.Fatalf("keptAgain retried a NO_MORE_RETRY overload (wait %v): it should move at once", d)
+	}
+	// the header spelling, too
+	hh := http.Header{}
+	hh.Set("X-Retry-Metadata", "NO_MORE_RETRY")
+	h2 := hw(529, hh, `{"error":{"code":"server_is_overloaded","message":"overloaded"}}`)
+	if d, ok := keptAgain(aff, c, h2, false); ok {
+		t.Fatalf("keptAgain retried a header NO_MORE_RETRY (wait %v)", d)
+	}
+	// a plain overload: asked again, as before
+	h3 := hw(529, http.Header{}, plain)
+	if _, ok := keptAgain(aff, c, h3, false); !ok {
+		t.Fatal("keptAgain didn't retry a plain overload: it should, as before")
+	}
+	// and a 6s blip, still asked again
+	h4 := http.Header{}
+	h4.Set("Retry-After", "6")
+	h5 := hw(529, h4, plain)
+	if _, ok := keptAgain(aff, c, h5, false); !ok {
+		t.Fatal("keptAgain didn't retry a 6s overload: it should")
 	}
 }
