@@ -172,6 +172,10 @@ const providerUsage = `usage:
        magpie provider set modelscope free=yes
                                    (every model of it counts as free, so a Free first routing spends it before
                                     paid ones, as a free daily quota; prices and Usage's costs stay as listed)
+       magpie provider set codex rest-per-model=yes
+                                   (a rate limit, a 5xx or a timeout rests that model on the key or account
+                                    alone: its other models are still asked, and two of them failing alike
+                                    within five minutes rests the key or account as ever. Off by default)
        magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… balance=https://relay.example.com/api/usage/token balance.path='$data.total_available / 500000'
        magpie provider set my-relay balance.path='(1 - credits.monthlyCredits / 70) %'
        magpie provider set my-relay balance.method=POST
@@ -898,6 +902,9 @@ func showProviderAsking(p provider.Provider, ask bool) error {
 	if p.CountFree {
 		kv("free", "yes"+muted.Render("  counted free by Free first and Cheapest routing; prices and Usage's costs stay as listed"))
 	}
+	if p.RestPerModel {
+		kv("rest-per-model", "yes"+muted.Render("  a rate limit, a 5xx or a timeout rests that model on the key or account alone; two of them failing alike within five minutes rests the key or account as ever"))
+	}
 	if p.NativeCompaction {
 		kv("compaction", "native"+muted.Render("  Codex's own, sealed by the key or account that answers it"))
 	}
@@ -1296,6 +1303,19 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 				return fmt.Errorf("unmasked=yes|no, not %q", v)
 			}
 			p.Unredacted = v == "yes"
+		case "rest-per-model":
+			// yes: a capability failure — a rate limit, a 5xx, a timeout
+			// — rests that model on the key or account alone, its other
+			// models still asked (bulkhead); two of them failing alike
+			// within five minutes rests the key or account as before
+			switch strings.ToLower(v) {
+			case "yes", "on":
+				p.RestPerModel = true
+			case "no", "off":
+				p.RestPerModel = false
+			default:
+				return fmt.Errorf("rest-per-model=yes|no, not %q", v)
+			}
 		case "free":
 			// yes: every model of it counts as free for Free first and
 			// Cheapest routing, by the user's word (jiabubu on Discord:

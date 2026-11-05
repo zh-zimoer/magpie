@@ -254,6 +254,22 @@ const (
 	// every time, never a step on the backoff ladder
 	overloadRest     = 30 * time.Second
 	overloadRestMost = time.Minute
+	// overloadHardRestMost: an overload whose Retry-After comes with
+	// x-retry-metadata: NO_MORE_RETRY names a hard window — the vendor
+	// refuses every request of that model until it passes, so resting a
+	// minute only asks again into a sure refusal and adds one 529 to the
+	// log each time (an episode of a 305s window asked again every 19s
+	// left 20+ attempts where 3 would do). Held to three minutes, not the
+	// window's full length: past that the window is near over anyway, and
+	// a shorter rest answers sooner when the vendor recovers early
+	overloadHardRestMost = 3 * time.Minute
+	// bulkheadWindow: how close together two of one key's or account's
+	// models have to fail a capability failure (rate limit, 5xx, timeout)
+	// for the key or account itself to rest (escalateRests), on a
+	// provider set rest-per-model. A vendor turning an account away says
+	// so across its models within a moment; one model's 529 on a busy day
+	// doesn't touch its siblings
+	bulkheadWindow = 5 * time.Minute
 	// longestRateRest is the most a rate limit that keeps coming back as
 	// soon as its rest is over is waited out, when the vendor says nothing
 	// of when (rateRest)
@@ -829,6 +845,16 @@ type Rest struct {
 	// asked, it answers from its own hold at once, or from what it serves
 	// now
 	there bool
+	// since: when the failure this rest answers arrived. escalateRests
+	// reads it to tell a second model's failure within bulkheadWindow of
+	// the first from one long after, which merges nothing
+	since time.Time
+	// overload: the vendor's servers were too busy for anyone (529
+	// server_is_overloaded). It says nothing of the key or account, so
+	// its rest never merges into an escalated one (escalateRests): two
+	// models' overloads are one capacity moment, not a refusal of the
+	// account
+	overload bool
 }
 
 // asksAt is when r, a key's rest out of its allowance or credit, has it
@@ -1573,8 +1599,10 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 			// a remote magpie's rest is the model's alone (caa53673, the
 			// key's own limit apart): the sink keeps the same scope, or
 			// one model's 429 would send the remote's other models, never
-			// limited, behind the others too
-			if remoteModelRest(c, failRate, header) || modelCooledDown(failRate, body) {
+			// limited, behind the others too — as on a provider set
+			// rest-per-model, whose rest is the model's as well
+			if remoteModelRest(c, failRate, header) || modelCooledDown(failRate, body) ||
+				c.p.RestPerModel && c.model != "" && !(c.isOpenRouterFree() && !sharedPool) {
 				sink(c.restID(), now)
 			} else {
 				sink(c.restKey(), now)
@@ -1617,11 +1645,27 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 			d, r.By = overloadRest, "cooldown"
 			if w := retryAfter(header, now); w > 0 {
 				d, r.By = min(w, overloadRestMost), "retry-after"
+				if w > d && noMoreRetry(header, body) {
+					// a hard window the vendor named (x-retry-metadata:
+					// NO_MORE_RETRY): inside it every ask is refused
+					// alike, so the minute's cooldown only asks again
+					// into a sure refusal, a dozen times over an
+					// episode. Hold to the window, up to three minutes
+					d = min(w, overloadHardRestMost)
+				}
 			}
+			r.overload = true
 			break
 		}
 		counted := c.restKey()
 		if unserved {
+			counted = c.restID()
+		}
+		// on a provider set rest-per-model the rest ends up the model's
+		// (below), so its ladder counts there too: a model's repeated
+		// 5xx climbs on its own rung, and a sibling's first failure
+		// starts at the minute rather than inheriting the key's
+		if c.p.RestPerModel && c.model != "" {
 			counted = c.restID()
 		}
 		// failing again while it still rests for a failure of this kind —
@@ -1646,7 +1690,7 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 		// account's, a sibling answered since it last did, so the failure
 		// is the model's: it climbs its own ladder and rests alone. A
 		// candidate naming no model has no sibling to tell apart
-		if !unserved && c.model != "" {
+		if !unserved && c.model != "" && counted != c.restID() {
 			if !again {
 				routed.failures[c.restID()]++
 			}
@@ -1745,6 +1789,27 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	if remoteModelRest(c, why, header) {
 		id, r.there = c.restID(), true
 	}
+	// bulkhead, on a provider set rest-per-model (provider.RestPerModel):
+	// a capability failure — a rate limit, a 5xx, a timeout — is that
+	// model's moment on that key or account, not a statement about it.
+	// Resting the key takes its other models out with it, and every
+	// group they sit first in loses its first member at once: one
+	// model's 429 on a subscription serving eight models, in five groups
+	// led by it, benched all five though the others answered throughout.
+	// So the rest is the model's, and escalateRests merges the rests
+	// back to the key once a second of its models fails alike within
+	// bulkheadWindow — a key truly turned away says so by failing
+	// everywhere, not once. Only a rest magpie timed itself is narrowed:
+	// a time the vendor named ("resets"), the key's own window read
+	// full ("window"), or a refusal (401, 403) is a statement about the
+	// key and stays the key's. Off by default: some vendors' limits are
+	// the key's own across its models, as Cline's plain rate limit is
+	if c.p.RestPerModel && (why == failRate || why == failOther) && c.model != "" && id == c.restKey() &&
+		(r.By == "cooldown" || r.By == "backoff" || r.By == "retry-after") &&
+		status != http.StatusUnauthorized && status != http.StatusForbidden &&
+		!(c.isOpenRouterFree() && !sharedPool) {
+		id = c.restID()
+	}
 	r.Key = id
 	if id == c.restID() {
 		r.Model = c.model
@@ -1777,10 +1842,21 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	prev := restingUntil.note[id]
 	named := !prev.askAt.IsZero() && prev.Why == r.Why && (r.By == "resets" || r.By == "retry-after")
 	if until, ok := restingUntil.m[id]; !ok || !until.After(r.Until) || named {
+		r.since = now
 		restingUntil.m[id] = r.Until
 		restingUntil.note[id] = r
 	}
+	// the bulkhead's escape hatch: a second of this key's models failing
+	// a capability failure within bulkheadWindow rests the key whole
+	escalated := id != c.restKey() && !overloaded && escalateRests(c, r, now)
 	restingUntil.Unlock()
+	if escalated {
+		// the key rests as a whole now: it goes to the back of the
+		// orders that sink, as a rate-limited key does, and the rest
+		// shown is the key's, not the model's
+		r.Key, r.Model = c.restKey(), ""
+		sink(c.restKey(), now)
+	}
 	if id == c.restKey() && (why == failQuota || why == failCredit) {
 		// a pool routed Until used up goes on from it, though it renews
 		// before the pool's next request (dzxx0496); one model of it
@@ -1815,6 +1891,20 @@ func rateUntilSaid(why, by string, body []byte) bool {
 // met alike (saidOverloaded).
 func vendorOverloaded(status int, body []byte) bool {
 	return saidOverloaded(status, string(wordsOf(body)))
+}
+
+// noMoreRetry says the vendor marked this refusal a hard window: its
+// x-retry-metadata header is NO_MORE_RETRY, or — as a Codex backend's
+// error carries its headers inside the body's error object — the body
+// names it. Inside the window the vendor refuses every ask alike, so
+// restAfterMarked holds the rest to it (overloadHardRestMost) rather
+// than the minute a plain overload rests for.
+func noMoreRetry(header http.Header, body []byte) bool {
+	if strings.EqualFold(strings.TrimSpace(header.Get("X-Retry-Metadata")), "NO_MORE_RETRY") {
+		return true
+	}
+	b := wordsOf(body)
+	return bytes.Contains(b, []byte("NO_MORE_RETRY")) && bytes.Contains(bytes.ToLower(b), []byte("retry-metadata"))
 }
 
 // modelCooledDown is a relay's refusal of one model whose pooled
@@ -1911,6 +2001,89 @@ func restSlow(c candidate, now time.Time) (Rest, bool) {
 	return r, true
 }
 
+// escalateRests is the bulkhead's escape hatch (bulkheadWindow), on a
+// provider set rest-per-model (provider.RestPerModel): a rest narrowed
+// to one model on a key or account stays the model's alone — until a
+// second of the key's models rests for a capability failure of its own
+// within bulkheadWindow of now. Two models of one key failing alike,
+// close together, is the key or account the vendor turned away (its
+// rate limit across the plan, its proxy's egress refused), not two
+// moments of capacity: every group led by it would ask it again, model
+// after model, each into the same refusal. The key rests then, until
+// the latest of its models' rests, and the models' own rests are
+// cleared so the key's ends them all at once. An overload (529) never
+// merges: it says nothing of the key. Called with restingUntil held.
+func escalateRests(c candidate, r Rest, now time.Time) bool {
+	if !c.p.RestPerModel || r.By == "off" || r.Until.IsZero() || r.Until.Before(now) {
+		return false
+	}
+	key := c.restKey()
+	prefix := key + "/"
+	var (
+		latest time.Time
+		models []string
+	)
+	for id, n := range restingUntil.note {
+		if id == key {
+			// the key rests already, for something that said it: a
+			// quota, a refusal — nothing to merge into
+			return false
+		}
+		if !strings.HasPrefix(id, prefix) || n.Until.Before(now) {
+			continue
+		}
+		// a capability failure the model rests for: a rate limit, a 5xx
+		// or a timeout on its backoff ladder, or the vendor's
+		// Retry-After. A quota, a credit, a restriction or a
+		// verification is the key's own business and merges nothing. An
+		// overload (529) never merges: it says nothing of the key
+		if n.overload || n.Why != failRate && n.Why != failOther ||
+			n.By != "cooldown" && n.By != "backoff" && n.By != "retry-after" {
+			continue
+		}
+		models = append(models, id)
+		if n.Until.After(latest) {
+			latest = n.Until
+		}
+	}
+	if len(models) < 2 {
+		return false
+	}
+	// the failures have to be close together: this one is fresh (now), so
+	// every model rest merged has to have started within bulkheadWindow
+	// of now. An old model's rest that never cleared says nothing of the
+	// one failing now
+	oldest := now
+	for _, id := range models {
+		if s := restingUntil.note[id].since; !s.IsZero() && s.Before(oldest) {
+			oldest = s
+		}
+	}
+	if now.Sub(oldest) > bulkheadWindow {
+		return false
+	}
+	esc := Rest{Why: r.Why, Status: r.Status, Until: latest, By: r.By,
+		Key: key, Error: restErrorEscalated(len(models))}
+	if a := c.p.Account; a != nil {
+		esc.agent, esc.user = a.UsageAgent(), a.User
+	}
+	for _, id := range models {
+		delete(restingUntil.m, id)
+		delete(restingUntil.note, id)
+	}
+	restingUntil.m[key] = latest
+	restingUntil.note[key] = esc
+	return true
+}
+
+// restErrorEscalated is the words an escalated rest is shown with: what
+// it rests for is its models' failures, each kept in the request's own
+// details
+func restErrorEscalated(n int) string {
+	return fmt.Sprintf("%d of its models failed within %v: the key rests until the last of them may be asked again",
+		n, bulkheadWindow)
+}
+
 // backingOff says key still rests after a failure that said nothing of
 // why (failOther), whose count a failure now would climb.
 func backingOff(key string, now time.Time) bool {
@@ -1932,6 +2105,13 @@ func backingOff(key string, now time.Time) bool {
 func (s *Server) rateRest(c candidate, header http.Header, body []byte, sharedPool bool, now time.Time) (time.Duration, string, int) {
 	id := c.restKey()
 	if c.isOpenRouterFree() && sharedPool || remoteModelRest(c, failRate, header) || modelCooledDown(failRate, body) {
+		id = c.restID()
+	}
+	// on a provider set rest-per-model the rest ends up the model's
+	// (restAfterMarked), so its ladder counts there too: one model's
+	// repeated 429s climb on their own, and a sibling's first 429
+	// starts at the minute rather than inheriting the account's rung
+	if c.p.RestPerModel && c.model != "" && !(c.isOpenRouterFree() && !sharedPool) {
 		id = c.restID()
 	}
 	n := 1

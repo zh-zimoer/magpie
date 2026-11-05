@@ -257,6 +257,20 @@ type Provider struct {
 	// upstreams, and a rest of half an hour held every request back until
 	// magpie restarted). Off by default: such a refusal rests it as ever.
 	LimitRestOff bool `json:"limitRestOff,omitempty"`
+	// RestPerModel narrows a capability failure — a rate limit, a 5xx or
+	// a timeout — to the model on the key or account that met it, leaving
+	// its other models asked (bulkhead): a subscription serving eight
+	// models in five routing groups used to rest whole on one model's
+	// 429, and every group led by it lost its first member at once. Two
+	// of its models failing alike within five minutes merge the rests
+	// back to the key or account (the vendor turned it away, not a
+	// moment of capacity). An overload (529) already rests the model
+	// alone, whichever way this is set. Off by default: a refusal rests
+	// as it did, which for some vendors is the key, as Cline's plain
+	// rate limit is. What the vendor said about the account — out of
+	// quota, out of credit, a refusal, a restriction, a verification —
+	// rests the account either way.
+	RestPerModel bool `json:"restPerModel,omitempty"`
 
 	// PriceRate is what the provider charges against the official price
 	// (ITea312, #819): a relay that bills 0.8× or 1.5× of it. It scales the
@@ -1025,6 +1039,9 @@ func accountSettings(a, pk Provider) Provider {
 	// how long its accounts rest out of quota, and the most they rest
 	// while they keep failing (#2008); or not at all for a limit
 	a.QuotaRest, a.QuotaResetAt, a.RestCap, a.LimitRestOff = pk.QuotaRest, pk.QuotaResetAt, pk.RestCap, pk.LimitRestOff
+	// a capability failure rests the model alone, not the account (#873's
+	// neighbours: a subscription serving many models)
+	a.RestPerModel = pk.RestPerModel
 	// what it bills against the official price (#819): an account's editor
 	// sets it as a key provider's does (PaulT on Discord, Codex)
 	a.PriceRate = pk.PriceRate

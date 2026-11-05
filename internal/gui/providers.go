@@ -1538,6 +1538,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// vendor sent them (ne9ko9); a save that leaves it out keeps
 			// it, as `magpie provider set <id> errors=pass` set it
 			PassErrors *bool `json:"passErrors"`
+			// RestPerModel is whether a capability failure (a rate
+			// limit, a 5xx, a timeout) rests that model on the key or
+			// account alone; a save that leaves it out keeps it
+			RestPerModel *bool `json:"restPerModel"`
 			// MaxConcurrency is how many requests each of its keys or
 			// accounts has out at once: a number (0 none), null for what
 			// its plugin says or none; a save that leaves it out keeps it
@@ -2015,6 +2019,14 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 					in.PassErrors = *req.PassErrors
 				} else if old != nil {
 					in.PassErrors = old.PassErrors
+				}
+				// RestPerModel is the bulkhead set from the CLI or an
+				// edit of providers.json (provider.RestPerModel): an
+				// editor save that doesn't carry it keeps it
+				if req.RestPerModel != nil {
+					in.RestPerModel = *req.RestPerModel
+				} else if old != nil {
+					in.RestPerModel = old.RestPerModel
 				}
 				if keepCC && old != nil {
 					in.MaxConcurrency = old.MaxConcurrency
