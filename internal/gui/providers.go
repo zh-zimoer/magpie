@@ -1421,6 +1421,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// LimitRestOff is whether a quota refusal or a 429 leaves it
 			// asked as usual; a save that leaves it out keeps it
 			LimitRestOff *bool `json:"limitRestOff"`
+			// RestPerModel is whether a capability failure (a rate
+			// limit, a 5xx, a timeout) rests that model on the key or
+			// account alone; a save that leaves it out keeps it
+			RestPerModel *bool `json:"restPerModel"`
 			// MaxConcurrency is how many requests each of its keys or
 			// accounts has out at once: a number (0 none), null for what
 			// its plugin says or none; a save that leaves it out keeps it
@@ -1840,6 +1844,14 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 					in.LimitRestOff = *req.LimitRestOff
 				} else if old != nil {
 					in.LimitRestOff = old.LimitRestOff
+				}
+				// RestPerModel is the bulkhead set from the CLI or an
+				// edit of providers.json (provider.RestPerModel): an
+				// editor save that doesn't carry it keeps it
+				if req.RestPerModel != nil {
+					in.RestPerModel = *req.RestPerModel
+				} else if old != nil {
+					in.RestPerModel = old.RestPerModel
 				}
 				if keepCC && old != nil {
 					in.MaxConcurrency = old.MaxConcurrency
