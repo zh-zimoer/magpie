@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/routes"
@@ -1552,13 +1553,24 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 			d, r.By = overloadRest, "cooldown"
 			if w := retryAfter(header, now); w > 0 {
 				d, r.By = min(w, overloadRestMost), "retry-after"
-				if w > d && noMoreRetry(header, body) {
-					// a hard window the vendor named (x-retry-metadata:
-					// NO_MORE_RETRY): inside it every ask is refused
-					// alike, so the minute's cooldown only asks again
-					// into a sure refusal, a dozen times over an
-					// episode. Hold to the window, up to three minutes
-					d = min(w, overloadHardRestMost)
+			}
+			// A Codex backend names its Retry-After inside the error
+			// body's headers, not the HTTP headers, so retryAfter above
+			// reads none of it and the 30s cooldown asks again into a
+			// window the vendor already said is closed. Where it marked
+			// the refusal a hard window (x-retry-metadata: NO_MORE_RETRY),
+			// hold to that window, up to three minutes: every ask inside
+			// it is refused alike, so a shorter rest only adds sure 529s
+			// to the log (a 305s window asked every 19s left 20+ where 3
+			// would do). Read the window from the body or the headers; a
+			// vendor that says stop but not for how long gets the cap.
+			if noMoreRetry(header, body) {
+				w := max(retryAfter(header, now), retryAfterInBody(body, now))
+				if w <= 0 {
+					w = overloadHardRestMost
+				}
+				if w > d {
+					d, r.By = min(w, overloadHardRestMost), "retry-after"
 				}
 			}
 			r.overload = true
@@ -1790,6 +1802,39 @@ func noMoreRetry(header http.Header, body []byte) bool {
 	}
 	b := wordsOf(body)
 	return bytes.Contains(b, []byte("NO_MORE_RETRY")) && bytes.Contains(bytes.ToLower(b), []byte("retry-metadata"))
+}
+
+// retryAfterInBody is a Retry-After the vendor put inside the error
+// body's headers rather than the HTTP headers, as the ChatGPT backend
+// does for its 529 (…,"headers":{"retry-after":"305","retry-after-ms":
+// "305000"}). Seconds under "headers.retry-after", else milliseconds
+// under "headers.retry-after-ms"; the error may sit under "error" or at
+// the top. 0 when it says none.
+func retryAfterInBody(body []byte, now time.Time) time.Duration {
+	if len(body) == 0 {
+		return 0
+	}
+	for _, root := range []string{"error.headers", "headers"} {
+		if v := gjson.GetBytes(body, root+".retry-after-ms"); v.Exists() {
+			if ms := v.Int(); ms > 0 {
+				return time.Duration(ms) * time.Millisecond
+			}
+		}
+		v := gjson.GetBytes(body, root+".retry-after")
+		if !v.Exists() {
+			continue
+		}
+		s := strings.TrimSpace(v.String())
+		if n, err := strconv.ParseFloat(s, 64); err == nil && n > 0 {
+			return time.Duration(n * float64(time.Second))
+		}
+		if t, err := http.ParseTime(s); err == nil {
+			if d := t.Sub(now); d > 0 {
+				return d
+			}
+		}
+	}
+	return 0
 }
 
 // modelCooledDown is a relay's refusal of one model whose pooled
