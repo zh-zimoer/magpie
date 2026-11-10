@@ -10188,9 +10188,26 @@ func withoutLoneToolChoice(body []byte) []byte {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false) // a vendor's <, > and & as it wrote them (#260)
-	enc.Encode(v)
+	// not json.NewEncoder(w): Encoder appends a newline after the JSON,
+	// and Codex 0.167's models reader refuses a body with anything after
+	// the document ("Data at line 1 column 20460, body: 20461 bytes",
+	// every /v1/models refresh, its list never shown). curl, python and
+	// jq all tolerate the trailing whitespace, so the byte was invisible
+	// to every check but the client's own. Marshal into a buffer, strip
+	// the newline Encode leaves at its end, and send the bytes alone —
+	// SetEscapeHTML(false) kept, a vendor's <, > and & as it wrote them
+	// (#260)
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if enc.Encode(v) != nil {
+		return
+	}
+	out := b.Bytes()
+	if len(out) > 0 && out[len(out)-1] == '\n' {
+		out = out[:len(out)-1]
+	}
+	w.Write(out)
 }
 
 // failTo answers the agent with an error: as writeError does, or as its
