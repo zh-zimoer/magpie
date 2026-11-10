@@ -10186,27 +10186,38 @@ func withoutLoneToolChoice(body []byte) []byte {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	// not json.NewEncoder(w): Encoder appends a newline after the JSON,
-	// and Codex 0.167's models reader refuses a body with anything after
-	// the document ("Data at line 1 column 20460, body: 20461 bytes",
-	// every /v1/models refresh, its list never shown). curl, python and
-	// jq all tolerate the trailing whitespace, so the byte was invisible
-	// to every check but the client's own. Marshal into a buffer, strip
-	// the newline Encode leaves at its end, and send the bytes alone —
-	// SetEscapeHTML(false) kept, a vendor's <, > and & as it wrote them
-	// (#260)
+	// Marshal into a buffer first, so the length is known and sent as
+	// Content-Length. json.NewEncoder(w) streams instead: with no length
+	// named, Go answers a "Connection: close" request close-delimited (no
+	// Content-Length, no chunked framing) and a keep-alive one chunked.
+	// Codex 0.167's models reader, reqwest, reads the list as a stream and
+	// takes the close that ends a close-delimited body for a broken
+	// stream — "stream disconnected before completion: failed to decode
+	// models response: Data at line 1 column N (body: N bytes)", every
+	// refresh, its list never shown (it falls back to a local catalog).
+	// curl, python and jq read to EOF and tolerate it, so the server
+	// looked healthy from every angle but the client's. A known length
+	// ends the body unambiguously for every reader.
+	//
+	// Not json.NewEncoder(w) for a second reason: it appends a newline
+	// after the JSON, which a strict reader also refuses. Marshal into a
+	// buffer and send the bytes alone. SetEscapeHTML(false) kept, a
+	// vendor's <, > and & as it wrote them (#260).
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	if enc.Encode(v) != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
 		return
 	}
 	out := b.Bytes()
 	if len(out) > 0 && out[len(out)-1] == '\n' {
 		out = out[:len(out)-1]
 	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
+	w.WriteHeader(status)
 	w.Write(out)
 }
 
