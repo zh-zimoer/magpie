@@ -145,6 +145,11 @@ type Key struct {
 	// "<provider>/*" or a group's "group/<name>"; none for every model,
 	// unless it lists accounts: then its accounts' providers' (HeldModels).
 	Models []string `json:"models,omitempty"`
+	// Aliases are the names the key gives models (tsingchao on X): a name
+	// its client asks by, the model "<provider>/<model>" it stands for.
+	// /v1/models lists the name in the model's place and a request by it
+	// goes to the model, which the key's Models must allow.
+	Aliases map[string]string `json:"aliases,omitempty"`
 	// Accounts are the accounts and keys the key may use (#905), as
 	// "<provider>/<account>": a signed-in account by its stable id, a
 	// key by its fingerprint; none for every account, as keys always did.
@@ -173,6 +178,12 @@ type Key struct {
 	// this field, which reads it as any other key, holds it to reading
 	// stats rather than handing it every model.
 	Browser bool `json:"browser,omitempty"`
+	// Admin lets the key use the management API (/v1/magpie/admin/, ljayic
+	// on X): AdminLocal from this computer only, AdminAny from the network
+	// too; "" for none. Only a key the user made themselves can have it:
+	// not a read-only, browser, issued or expiring key, nor the default
+	// sharing key, which magpie hands to agents.
+	Admin string `json:"admin,omitempty"`
 	// Expires is when the key stops working (an issued key, IssueKey);
 	// zero for one that doesn't. Prune removes it a while after.
 	Expires time.Time `json:"expires,omitzero"`
@@ -187,6 +198,54 @@ type Key struct {
 	// queue and go out in order, as over a provider's MaxConcurrency.
 	// 0 for no limit.
 	MaxConcurrency int `json:"maxConcurrency,omitempty"`
+	// ServiceTier is the service tier the key's OpenAI-API requests (Chat
+	// and Responses) are sent at whatever the client asked (JackyFill on
+	// X): settings.CodexTierStandard for none, "priority" (Codex's Fast)
+	// or "ultrafast"; "" follows the request.
+	ServiceTier string `json:"serviceTier,omitempty"`
+	// Redact is whether Settings › Privacy's masking applies to the key's
+	// requests (y0ngb1n on X): "" follows the setting, RedactOn masks them
+	// even where the setting masks nothing, RedactOff sends them as they
+	// are, for a device the user trusts. A request with no key (this
+	// computer's own) always follows the setting.
+	Redact string `json:"redact,omitempty"`
+}
+
+// A key's Redact.
+const (
+	RedactOn  = "on"
+	RedactOff = "off"
+)
+
+// CleanRedact is a key's masking setting as it is kept: "" to follow
+// Settings › Privacy, RedactOn or RedactOff.
+func CleanRedact(v string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "follow", "global", "default", "auto":
+		return "", nil
+	case "on", "true", "yes", "mask":
+		return RedactOn, nil
+	case "off", "false", "no", "none":
+		return RedactOff, nil
+	}
+	return "", fmt.Errorf("Masking: one of follow, on or off, not %q", v)
+}
+
+// CleanTier is a key's service tier as it is kept: "" to follow the
+// request, settings.CodexTierStandard, "priority" or "ultrafast", read from
+// the words people use for them too (normal, fast, ultra_fast).
+func CleanTier(v string) (string, error) {
+	switch strings.ToLower(strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.TrimSpace(v))) {
+	case "", "follow", "asked", "off":
+		return "", nil
+	case "default", "standard", "normal", "none":
+		return settings.CodexTierStandard, nil
+	case "priority", "fast":
+		return "priority", nil
+	case "ultrafast":
+		return "ultrafast", nil
+	}
+	return "", fmt.Errorf("Service tier: one of follow, standard, fast or ultrafast, not %q", v)
 }
 
 // MaxKeyConcurrency is the most MaxConcurrency a key may have, as a
@@ -200,6 +259,8 @@ type Identity struct {
 	Limit          *Limit
 	More           []Limit
 	Models         []string
+	// Aliases are Key.Aliases; an issued key has none.
+	Aliases map[string]string
 	// AccountModels says Models are only HeldModels' "<provider>/*" of
 	// a key that names accounts and no model, nor does the key it was
 	// issued under: every model of those accounts' providers is the
@@ -216,6 +277,8 @@ type Identity struct {
 	// Browser: the key may connect the Magpie Browser extension and do
 	// nothing else (Key.Browser).
 	Browser bool
+	// Admin is Key.Admin, "" for a key that can't have it (adminOf).
+	Admin string
 	// sum is the SHA-256 of the secret the request came with, so a
 	// connection kept open can tell the key was rotated since (Current).
 	sum [32]byte
@@ -231,6 +294,10 @@ type Identity struct {
 	// (Key.MaxConcurrency), 0 for none; an issued key is held to its
 	// issuer's too (Issuer.MaxConcurrency).
 	MaxConcurrency int
+	// ServiceTier is Key.ServiceTier.
+	ServiceTier string
+	// Redact is Key.Redact; an issued key is held on by its issuer's on.
+	Redact string
 	// Default: the key is the sharing key magpie made itself (Default),
 	// the one it writes into this computer's own agents that reach the
 	// gateway from beyond loopback, never one the user made for someone
@@ -332,7 +399,7 @@ func LANSecret() string {
 	// not shared, the usual case, is told by the settings alone, before
 	// the lock: taken first, every agent's sync (keeping) made and locked
 	// caller-keys.json.lock, ~100 times in a start's first 20s (#1665)
-	if !settings.Load().LAN {
+	if !settings.Shared().LAN {
 		return ""
 	}
 	mu.Lock()
@@ -418,6 +485,8 @@ type Change struct {
 	Index *int `json:"index,omitempty"`
 	// Models is what "models-key" sets; none lets the key use every model.
 	Models []string `json:"models,omitempty"`
+	// Aliases is what "aliases-key" sets; none takes the names away.
+	Aliases map[string]string `json:"aliases,omitempty"`
 	// Accounts is what "accounts-key" sets (#905); none lets the key use
 	// every account and key.
 	Accounts []string `json:"accounts,omitempty"`
@@ -432,12 +501,19 @@ type Change struct {
 	// Browser is what "add-key" gives the new key: it may connect the
 	// Magpie Browser extension alone (Key.Browser).
 	Browser bool `json:"browser,omitempty"`
+	// Admin is what "admin-key" sets (CleanAdmin's AdminLocal, AdminAny or "").
+	Admin string `json:"admin,omitempty"`
 	// Issues is what "issuer-key" sets: the key may issue short-lived
 	// keys under itself (Key.Issues).
 	Issues bool `json:"issues,omitempty"`
 	// MaxConcurrency is what "concurrency-key" sets: how many requests
 	// the key may have in flight at once, 0 for no limit.
 	MaxConcurrency int `json:"maxConcurrency,omitempty"`
+	// ServiceTier is what "tier-key" sets (Key.ServiceTier), "" to follow
+	// the request.
+	ServiceTier string `json:"serviceTier,omitempty"`
+	// Redact is what "redact-key" sets (Key.Redact): "", "on" or "off".
+	Redact string `json:"redact,omitempty"`
 	// Secret is the value "add-key" gives the new key, one its clients
 	// already send (love1sbug on X: keys handed out from another gateway),
 	// or "rotate-key" gives the key; "" for one magpie makes.
@@ -485,7 +561,7 @@ func Update(action string, in Change) (string, error) {
 		if i < 0 {
 			return "", errors.New("Key not found")
 		}
-		defaultKey := keys[i].LAN || keys[i].ID == settings.Load().LANKeyID
+		defaultKey := keys[i].LAN || keys[i].ID == settings.Shared().LANKeyID
 		if defaultKey {
 			keys[i].LAN = true
 		}
@@ -583,6 +659,18 @@ func Update(action string, in Change) (string, error) {
 				return "", err
 			}
 			keys[i].Models = ms
+		case "aliases-key":
+			as, err := CleanAliases(in.Aliases)
+			if err != nil {
+				return "", err
+			}
+			held := HeldModels(keys[i].Models, keys[i].Accounts)
+			for name, target := range as {
+				if !ModelAllowed(held, target) {
+					return "", fmt.Errorf("The key may not use %s, so it can't name it %s: add it to the key's models first", target, name)
+				}
+			}
+			keys[i].Aliases = as
 		case "accounts-key":
 			as, err := CleanAccounts(in.Accounts)
 			if err != nil {
@@ -602,6 +690,18 @@ func Update(action string, in Change) (string, error) {
 				return "", fmt.Errorf("Concurrency: a whole number from 0 to %d", MaxKeyConcurrency)
 			}
 			keys[i].MaxConcurrency = in.MaxConcurrency
+		case "tier-key":
+			tier, err := CleanTier(in.ServiceTier)
+			if err != nil {
+				return "", err
+			}
+			keys[i].ServiceTier = tier
+		case "redact-key":
+			mode, err := CleanRedact(in.Redact)
+			if err != nil {
+				return "", err
+			}
+			keys[i].Redact = mode
 		case "issuer-key":
 			// may issue short-lived keys under itself (POST /v1/magpie/keys)
 			if in.Issues && keys[i].Browser {
@@ -624,6 +724,27 @@ func Update(action string, in Change) (string, error) {
 				return "", errors.New("This key is the Magpie Browser extension's: it connects the extension and nothing else. Add another key for models or stats")
 			}
 			keys[i].ReadOnly = in.ReadOnly
+			if in.ReadOnly {
+				keys[i].Admin = ""
+			}
+		case "admin-key":
+			// the management API changes providers, accounts and keys, so
+			// only a key the user made for it can hold it
+			level, err := CleanAdmin(in.Admin)
+			if err != nil {
+				return "", err
+			}
+			if level != "" {
+				switch {
+				case defaultKey:
+					return "", errors.New("The sharing key is the one magpie gives agents that reach it from elsewhere, so it can't manage magpie: add a key of its own for that")
+				case keys[i].Browser || keys[i].ReadOnly:
+					return "", errors.New("A read-only key, or the Magpie Browser extension's, can't manage magpie: add another key for that")
+				case keys[i].Issuer != "" || !keys[i].Expires.IsZero():
+					return "", errors.New("An issued key can't manage magpie: let a key of yours do it")
+				}
+			}
+			keys[i].Admin = level
 		case "on-key", "off-key":
 			keys[i].Off = action == "off-key"
 		case "remove-key":
@@ -647,7 +768,7 @@ func Update(action string, in Change) (string, error) {
 		default:
 			return "", fmt.Errorf("unknown key action %q", action)
 		}
-		if defaultKey && action != "remove-key" && action != "rename-key" && action != "limit-key" && action != "reset-limit-key" && action != "models-key" && action != "accounts-key" && action != "mcp-key" && action != "quotas-key" && action != "concurrency-key" && action != "access-key" && action != "issuer-key" && action != "move-key" {
+		if defaultKey && action != "remove-key" && action != "rename-key" && action != "limit-key" && action != "reset-limit-key" && action != "models-key" && action != "aliases-key" && action != "accounts-key" && action != "mcp-key" && action != "quotas-key" && action != "concurrency-key" && action != "tier-key" && action != "redact-key" && action != "access-key" && action != "issuer-key" && action != "admin-key" && action != "move-key" {
 			mirror = &keys[i]
 		}
 	}
@@ -897,4 +1018,32 @@ func save(keys []Key) error {
 		return err
 	}
 	return edit.WriteAtomic(Path(), append(b, '\n'))
+}
+
+// The levels of Key.Admin.
+const (
+	AdminLocal = "local"
+	AdminAny   = "any"
+)
+
+// CleanAdmin reads a management level: "" (off), AdminLocal or AdminAny.
+func CleanAdmin(v string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "off", "none", "no", "false":
+		return "", nil
+	case "local", "this-computer", "loopback":
+		return AdminLocal, nil
+	case "any", "remote", "on", "all":
+		return AdminAny, nil
+	}
+	return "", fmt.Errorf("unknown management level %q: use off, local or any", v)
+}
+
+// adminOf is the management level a key really has: none for a key that
+// can't hold it, whatever the file says.
+func adminOf(k Key) string {
+	if k.Issuer != "" || k.ReadOnly || k.Browser || !k.Expires.IsZero() || k.LAN {
+		return ""
+	}
+	return k.Admin
 }

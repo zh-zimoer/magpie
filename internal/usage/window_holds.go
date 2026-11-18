@@ -28,14 +28,14 @@ func init() { provider.ReckonHolds = WithWindowHolds }
 func WithWindowHolds(qs []provider.SubscriptionQuota, now time.Time) []provider.SubscriptionQuota {
 	since, ok := holdsSince(qs, now)
 	if !ok { // none can be reckoned: each one only says why
-		return windowHolds(qs, now, time.Time{}, nil, provider.Renames{}, nil, nil, func(func(Record)) {})
+		return carryHolds(windowHolds(qs, now, time.Time{}, nil, provider.Renames{}, nil, nil, func(func(Record)) {}), now)
 	}
 	s := readLogSnapshot()
 	hist := provider.QuotaHistories(since, "", "")
 	started := withRecordedWindowStarts(qs, hist, now)
 	dry := dryRuns(started, hist, now)
 	out := windowHolds(started, now, s.firstOwn, apiPricer(), provider.UsageRenames(), provider.SamePlanAccounts(), dry, func(fn func(Record)) { s.visit(since, fn) })
-	return withSpansOf(out, qs)
+	return carryHolds(withSpansOf(out, qs), now)
 }
 
 // holdsSince is the earliest start of a window that could be reckoned.
@@ -74,7 +74,9 @@ func holdsBounds(q provider.SubscriptionQuota, w provider.QuotaWindow, at time.T
 	// Discord); the models' own windows drawing on it, and a pool whose
 	// models aren't known, aren't.
 	pool := w.PoolWindow() && len(provider.PoolMembers(q.Windows, w)) > 0
-	if w.Unlimited || w.Aside && !pool || w.Family != "" || w.Pool != "" && !pool || math.IsNaN(w.Used) {
+	// a wallet (Balance) has no whole: its Used, on a capped account, is
+	// what it spent in the cap's period (provider's wallet_spend.go)
+	if w.Unlimited || w.Aside && !pool || w.Family != "" || w.Pool != "" && !pool || w.Balance != nil || math.IsNaN(w.Used) {
 		return time.Time{}, time.Time{}, "-"
 	}
 	if w.Used < provider.HoldsFloor {
@@ -265,6 +267,7 @@ func windowHolds(qs []provider.SubscriptionQuota, now, first time.Time, priceOf 
 			h.Routed.CacheWrite += int64(r.CacheWrite)
 			if pr := priceOf(r); pr != nil {
 				h.Routed.Cost += r.CostAt(*pr)
+				h.Routed.BaseCost += r.CostAt(baseRates(*pr))
 			} else {
 				unpriced[s] = true
 			}
@@ -303,10 +306,27 @@ func windowHolds(qs []provider.SubscriptionQuota, now, first time.Time, priceOf 
 		if !unpriced[s] && h.Routed.Cost > 0 {
 			h.Priced = true
 			h.Cost = h.Routed.Cost * scale
+			// told only where a premium was paid: the same figure twice
+			// would ask the reader to tell them apart for nothing
+			if math.Abs(h.Routed.Cost-h.Routed.BaseCost) > 1e-9 {
+				h.BaseCost = h.Routed.BaseCost * scale
+			} else {
+				h.Routed.BaseCost = 0
+			}
+		} else {
+			h.Routed.BaseCost = 0
 		}
 		w.Holds = h
 	}
 	return out
+}
+
+// baseRates is pr without its long-context tiers: every call at the base
+// rates however large its input (WindowHolds.BaseCost, #5861). A peak
+// hour's price is kept, as that is what the vendor's base rate is then.
+func baseRates(pr catalog.Price) catalog.Price {
+	pr.Tiers = nil
+	return pr
 }
 
 // apiPricer is each call's model at its API list price: its maker's, else
@@ -320,7 +340,7 @@ func windowHolds(qs []provider.SubscriptionQuota, now, first time.Time, priceOf 
 func apiPricer() func(Record) *catalog.Price {
 	st := settings.Load()
 	wires := st.Wires()
-	prices := map[[4]string]*catalog.Price{}
+	prices := map[[5]string]*catalog.Price{}
 	one := func(providerID, model string) *catalog.Price {
 		v, ok := provider.MakerPrice(model)
 		if !ok || v.Cost(1e6, 1e6, 0, 0) == 0 {
@@ -344,7 +364,8 @@ func apiPricer() func(Record) *catalog.Price {
 			served = ""
 		}
 		id := r.priceID()
-		k := [4]string{id, r.Model, served, r.Effort}
+		tier := r.billedTier()
+		k := [5]string{id, r.Model, served, r.Effort, tier}
 		if pr, ok := prices[k]; ok {
 			return pr
 		}
@@ -361,6 +382,8 @@ func apiPricer() func(Record) *catalog.Price {
 		if pr == nil && served != "" {
 			pr = one(id, served)
 		}
+		// a Fast call is worth Fast's API price (Pricer)
+		pr = tierPriced(pr, tier, served, r.Model)
 		prices[k] = pr
 		return pr
 	}

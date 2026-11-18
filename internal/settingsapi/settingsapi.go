@@ -28,25 +28,25 @@ import (
 // written.
 var Keys = []string{
 	// Appearance
-	"theme", "colorblind", "reduceMotion", "noBird", "lang", "uiFont", "codeFont",
+	"theme", "accent", "colorblind", "reduceMotion", "noBird", "lang", "uiFont", "codeFont",
 	// the tray, the Dock and this computer
 	"tray", "dock", "dockWindow", "dockNever", "lightweight", "keepAwake", "keepAwakeDisplay",
-	"noWSLAgents", "sessionTerminal", "signInLinkOnly", "quitNoAsk",
+	"noWSLAgents", "sessionTerminal", "signInLinkOnly", "quitNoAsk", "restoreOnQuit", "name",
 	// the menu bar's allowance cards
-	"trayUsages", "trayUsage", "trayUsageEvery", "trayNoLogos", "trayNoBird", "trayNoNumber", "trayPace", "trayNoCost", "trayWindows",
+	"trayUsages", "trayUsage", "trayUsageEvery", "trayNoLogos", "trayAnthropicMark", "trayNoBird", "trayNoNumber", "trayPace", "trayNoCost", "trayWindows",
 	// usage and alerts
-	"currency", "chineseUnits", "usageAlert", "balanceAlert", "resetReminder", "turnDoneAlert", "maskAlert",
+	"currency", "totalCurrency", "trayCurrency", "chineseUnits", "dayStart", "usageAlert", "balanceAlert", "resetReminder", "turnDoneAlert", "maskAlert",
 	// network
-	"proxy",
+	"proxy", "pluginProxy", "updateProxy", "updateSource",
 	// privacy
 	"redact", "redactPersonal", "redactKinds", "redactWords", "redactWordsAnyCase", "redactWordsWhole", "redactShape",
 	"noStats", "noUsageStats", "otel",
 	// warm-ups and check-ins
 	"codexWarmup", "claudeWarmup", "codexWarmAt", "claudeWarmAt", "codexWarmAts", "claudeWarmAts",
-	"workbuddyCheckin", "traeCheckin", "minimaxCheckin", "qoderCheckin",
+	"workbuddyCheckin", "traeCheckin", "minimaxCheckin", "qoderCheckin", "checkinAt",
 	// models: replies, vision, images, search
-	"replyModel", "noLoopGuard", "claudeLeanPrompt", "claudePrintMode", "refusalRetries", "retryAfterCap",
-	"vision", "visionEffort", "imageGen", "imageTimeout", "classifyTimeout",
+	"replyModel", "noLoopGuard", "claudeLeanPrompt", "claudeNoExtraUsage", "claudePrintMode", "refusalRetries", "retryAfterCap",
+	"vision", "visionEffort", "imageGen", "videoGen", "imageTimeout", "classifyTimeout",
 	// what every routing group does that says nothing of its own
 	"groupSink", "groupFirstToken", "groupPatience",
 	"searcher", "searcherThen", "searcherEffort", "searchFirst",
@@ -63,10 +63,14 @@ var Choices = map[string][]string{
 	"lang":           settings.Langs,
 	"tray":           settings.Trays,
 	"currency":       settings.Currencies,
+	"totalCurrency":  settings.TotalCurrencies,
+	"trayCurrency":   settings.TotalCurrencies,
 	"codexWarmup":    {"off", "week", "all"},
 	"claudeWarmup":   {"off", "week", "all"},
 	"trayUsageEvery": ints(settings.TrayEvery),
-	"updateChannel":  {settings.UpdateStable},
+	"dayStart":       {"0", "1", "2", "3", "4", "5", "6"},
+	"updateChannel":  {settings.UpdateStable, settings.UpdateDaily},
+	"updateSource":   {settings.UpdateSourceSite, settings.UpdateSourceGitHub},
 	"updateEvery":    ints(settings.UpdateEveries),
 	"searchFirst":    {settings.SearchFirstModel, settings.SearchFirstAPI},
 	"replyModel":     settings.ReplyModels,
@@ -206,6 +210,10 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 		in.RedactShape = cur.RedactShape
 	}
 	// nor how long an image is given to be drawn
+	// nor the video model, picked in its own row
+	if _, sent := fields["videoGen"]; !sent {
+		in.VideoGen = cur.VideoGen
+	}
 	if _, sent := fields["imageTimeout"]; !sent {
 		in.ImageTimeout = cur.ImageTimeout
 	}
@@ -228,6 +236,15 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	if _, sent := fields["reduceMotion"]; !sent {
 		in.ReduceMotion = cur.ReduceMotion
 	}
+	// nor the accent colour, which pages before it never sent
+	if _, sent := fields["accent"]; !sent {
+		in.Accent = cur.Accent
+	}
+	// nor what this magpie is called, which pages before it never sent
+	// (starballl on X): a page that leaves it out keeps it
+	if _, sent := fields["name"]; !sent {
+		in.Name = cur.Name
+	}
 	// nor whether the loading bird is kept off
 	if _, sent := fields["noBird"]; !sent {
 		in.NoBird = cur.NoBird
@@ -236,6 +253,10 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	// (zhujiu on Discord), which the Quit question sets too
 	if _, sent := fields["quitNoAsk"]; !sent {
 		in.QuitNoAsk = cur.QuitNoAsk
+	}
+	// nor whether a quit puts the agents back as they were
+	if _, sent := fields["restoreOnQuit"]; !sent {
+		in.RestoreOnQuit = cur.RestoreOnQuit
 	}
 	// nor what a reply's model name says, which they sent as memberModel:
 	// a change of it is that, and else the name stays as it is (vendor
@@ -259,6 +280,7 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	}
 	in.AgentOrder, in.AgentsHidden, in.AgentsShown, in.AgentsHere = cur.AgentOrder, cur.AgentsHidden, cur.AgentsShown, cur.AgentsHere
 	in.Window, in.WindowMaximised, in.WindowAt = cur.Window, cur.WindowMaximised, cur.WindowAt // the window's own, as it was last resized and moved
+	in.OnTop = cur.OnTop                                                                       // and pinned on top, by its title bar's pin (window/ontop)
 	// and what other pages keep here: which models an agent is shown, and
 	// everything the user said of a model anywhere else in the app, set on
 	// its own. The per-model maps are carried whole rather than named one
@@ -277,18 +299,29 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.PluginOptions = cur.PluginOptions     // set on its own (plugin-option)
 	in.CheckinOff = cur.CheckinOff           // set on its own (checkin-account)
 	settings.CarryPerModel(&in, &cur)
+	in.Wallpaper = cur.Wallpaper // set on its own (appearance/wallpaper)
 	in.LAN, in.LANKey = cur.LAN, cur.LANKey
 	in.LANKeyID = cur.LANKeyID
-	in.Port = cur.Port                                 // set on its own (port), which moves the gateway
-	in.CORSOrigins = cur.CORSOrigins                   // set on its own (cors)
-	in.AllowIPs = cur.AllowIPs                         // set on its own (allowips)
-	in.FetchPrivate = cur.FetchPrivate                 // in settings.json only
-	in.RouterNote = cur.RouterNote                     // set on its own (the Library's servers/hub-note)
-	in.RouterAllTools = cur.RouterAllTools             // set on its own (the Library's servers/hub-tools)
-	in.GitHubToken = cur.GitHubToken                   // set on its own (github-token), never sent to the page
-	in.ProxyCustom = cur.ProxyCustom                   // set by settings.Save from the proxy, never by the page
+	// Bark has its own route (bark); the page never sees its key
+	in.BarkServer, in.BarkKey, in.BarkDaily = cur.BarkServer, cur.BarkKey, cur.BarkDaily
+
+	in.Port = cur.Port                           // set on its own (port), which moves the gateway
+	in.CORSOrigins = cur.CORSOrigins             // set on its own (cors)
+	in.AllowIPs = cur.AllowIPs                   // set on its own (allowips)
+	in.MTLS = cur.MTLS                           // set on its own (mtls)
+	in.HTTPS = cur.HTTPS                         // set on its own (https)
+	in.FetchPrivate = cur.FetchPrivate           // in settings.json only
+	in.RouterNote = cur.RouterNote               // set on its own (the Library's servers/hub-note)
+	in.RouterAllTools = cur.RouterAllTools       // set on its own (the Library's servers/hub-tools)
+	in.GitHubToken = cur.GitHubToken             // set on its own (github-token), never sent to the page
+	in.ProxyCustom = cur.ProxyCustom             // set by settings.Save from the proxy, never by the page
+	in.PluginProxyCustom = cur.PluginProxyCustom // and plugin downloads' from theirs
+	in.UpdateProxyCustom = cur.UpdateProxyCustom // and updates'
+	in.ProxyNames = cur.ProxyNames
+	in.Proxies = cur.Proxies                           // set on its own (proxies), the password never sent to the page
 	in.RequestArchive = cur.RequestArchive             // the Gateway page's, set on its own
 	in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB   // in settings.json only
+	in.RequestArchiveMB = cur.RequestArchiveMB         // in settings.json only
 	in.ClaudeRunsMost = cur.ClaudeRunsMost             // magpie claude-code runs, or settings.json (#2956)
 	in.GatewayConversations = cur.GatewayConversations // Sessions' explicit recording consent
 	in.RedactRules = cur.RedactRules                   // the masking rules, set on their own
@@ -300,21 +333,25 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.RedactActions = cur.RedactActions               // set on their own (redact-actions)
 	in.RedactAllow = cur.RedactAllow                   // set on its own (redact-allow)
 	in.DisabledModels = cur.DisabledModels             // set on their own (disabled-models, #1867)
+	in.AgentTelemetryOff = cur.AgentTelemetryOff       // set on its own (agent-telemetry), which writes the agents' files
 	// the request archive on this computer: the archive's switch while no
 	// S3 bucket, and its size in settings.json only
 	in.RequestArchiveLocal, in.RequestArchiveLocalMB = cur.RequestArchiveLocal, cur.RequestArchiveLocalMB
 	// used or left is the Usage page's toggle as much as Settings', set on its own
 	in.QuotaLeft = cur.QuotaLeft
-	in.QuotaReads = cur.QuotaReads   // set on its own (quota-reads)
-	in.SearchAll = cur.SearchAll     // set on its own (search-all)
-	in.SearchCount = cur.SearchCount // and so is this (search-count)
-	in.UsageOrder = cur.UsageOrder   // the Usage page's, dragged there
+	in.QuotaReads = cur.QuotaReads           // set on its own (quota-reads)
+	in.SearchAll = cur.SearchAll             // set on its own (search-all)
+	in.SearchCount = cur.SearchCount         // and so is this (search-count)
+	in.UsageOrder = cur.UsageOrder           // the Usage page's, dragged there
+	in.PluginPageOrder = cur.PluginPageOrder // the sidebar plugin pages, dragged there
 	// and what the tray panel's Allowances tab leaves out, set there
 	in.PanelUsageHidden = cur.PanelUsageHidden
 	// and the clients the Usage page's Agents list leaves out, set there
 	in.UsageAgentsHidden = cur.UsageAgentsHidden
 	// and the allowance cards the Usage page's Overview leaves out, set there
 	in.UsageCardsHidden = cur.UsageCardsHidden
+	// and the quota rows of a card it leaves out, set there too
+	in.UsageWindowsHidden = cur.UsageWindowsHidden
 	// and the names models' usage is counted under (magpie model alias)
 	in.UsageAliases = cur.UsageAliases
 	// and the clears of usage made on the Usage page
@@ -323,28 +360,47 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.ClientAgents = cur.ClientAgents
 	// how agents' lists name models, set on its own for the agents to be told
 	in.PlainNames, in.PlainOwnNames = cur.PlainNames, cur.PlainOwnNames
+	in.AgentSuffix = cur.AgentSuffix   // and each agent's own (agent-suffix)
 	in.BareModelIDs = cur.BareModelIDs // set on its own (bare-ids)
-	in.BusyLoad = cur.BusyLoad         // and so is this (busy-load)
+	in.BareModelIDsOnly = cur.BareModelIDsOnly
+	in.BusyLoad = cur.BusyLoad // and so is this (busy-load)
 	in.CodexAgentsV1 = cur.CodexAgentsV1
 	in.FullContext = cur.FullContext     // set on its own (full-context)
 	in.CompactAt = cur.CompactAt         // and so is the threshold
 	in.AgentCompacts = cur.AgentCompacts // and each agent's own (agent-compact)
+	in.AgentContexts = cur.AgentContexts // and the windows each is told (agent-contexts)
+	in.ContextCap = cur.ContextCap       // and the longest window of every model (context-cap)
+	in.ContextCapAll = cur.ContextCapAll // and whether it holds the user's own windows
 	// Codex's background compaction, set on its own (codex-async-compact)
 	in.CodexAsyncCompact, in.CodexAsyncCompactPercent = cur.CodexAsyncCompact, cur.CodexAsyncCompactPercent
 	// Claude Desktop's list, set in its row on the Agents page
 	in.DesktopLongest = cur.DesktopLongest
+	// and whether it runs in a folder of its own, set there too (#5671)
+	in.DesktopIsolated = cur.DesktopIsolated
+	// and whether its Code tab has a Claude Code folder of its own (#6459)
+	in.DesktopIsolatedClaude = cur.DesktopIsolatedClaude
+	in.DesktopIsolatedClaudeChosen = cur.DesktopIsolatedClaudeChosen
 	// and the Get started card put away, from the card itself
 	in.GuideHidden = cur.GuideHidden
 
 	in.CodexTitles = cur.CodexTitles             // set on its own (codex-titles)
 	in.CodexDescriptions = cur.CodexDescriptions // set on its own (codex-descriptions)
 	in.CodexPredictions = cur.CodexPredictions   // and codex-predictions
+	in.CodexSuggestions = cur.CodexSuggestions   // and codex-suggestions
 	// and so is the model Codex's auto-review runs on (codex-auto-review)
 	in.CodexAutoReview = cur.CodexAutoReview
 	// and the models Codex's and Desktop's subagents are put on, set
 	// in their Agents rows
 	in.CodexSubagentModel = cur.CodexSubagentModel
+	in.CodexOpen = cur.CodexOpen // set on its own (codex-open)
 	in.DesktopSubagentModel = cur.DesktopSubagentModel
+	in.DesktopGateway = cur.DesktopGateway     // Desktop's address, set in its row
+	in.CodexServiceTier = cur.CodexServiceTier // codex-service-tier
+	in.CodexClient = cur.CodexClient           // codex-client
+	// and the model DeepSeek Harness compacts on, set in its row
+	in.DshCompactModel = cur.DshCompactModel
+	// and the model Codex compacts on, set in its row
+	in.CodexCompactModel = cur.CodexCompactModel
 	// and the model for requests masking would change (redact-route)
 	in.RedactRouteTo = cur.RedactRouteTo
 	in.DesktopSubagentEffort = cur.DesktopSubagentEffort
@@ -381,9 +437,12 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 		}
 	}
 	if v := strings.TrimSpace(in.ImageGen); v != "" && v != "off" && v != cur.ImageGen {
-		if _, _, ok := provider.Resolve(v); !ok {
+		if gateway.DrawerMissingOf(v) != "" {
 			return in, fmt.Errorf("no model %s to generate images", v)
 		}
+	}
+	if v := strings.TrimSpace(in.VideoGen); v != "" && v != cur.VideoGen && gateway.VideomakerMissingOf(v) != "" {
+		return in, fmt.Errorf("no model %s to make videos", v)
 	}
 	// the searchers after the one named, set in their own row: a save
 	// that doesn't send them (prefsKeep has none) keeps them, and an

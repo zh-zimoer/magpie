@@ -19,7 +19,6 @@ package claudetui
 import (
 	"bufio"
 	"bytes"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -29,16 +28,18 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/bridgesid"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/wslrun"
 )
 
@@ -63,6 +64,8 @@ var (
 type shim struct {
 	outMu sync.Mutex
 	out   io.Writer
+	// held takes what is written meanwhile, nil when none (whole.go)
+	held io.Writer
 
 	// pty is Claude Code's terminal: what it draws is read from it, and
 	// what is typed written to it
@@ -90,6 +93,11 @@ type shim struct {
 	rowsMu sync.Mutex
 	rows   int
 	rowsCh chan struct{}
+	// said is the words of the messages that reached the transcript since
+	// one was sent, to check it whole (whole.go); nil when none is
+	said []heardRow
+	// taken is the image files' paths Claude Code took as images meanwhile
+	taken []string
 	// a turn is going: from a message's row to the turn's end
 	busy bool
 
@@ -150,16 +158,23 @@ func Run(args []string) error {
 	}
 	args = interactiveArgs(pargs[len(wslArgs(wsl)):])
 	s := &shim{out: os.Stdout, changed: make(chan struct{}, 1), rowsCh: make(chan struct{}, 1), exited: make(chan struct{}), readDone: make(chan struct{}), wsl: wsl, listed: mcpListed(args)}
-	resume := ""
+	resume, named := "", ""
 	for i, a := range args {
 		if a == "--resume" && i+1 < len(args) {
 			resume = args[i+1]
 		}
+		if a == "--session-id" && i+1 < len(args) {
+			named = args[i+1]
+		}
 	}
 	if resume != "" {
 		s.sid = resume
+	} else if named != "" {
+		// the bridge's own id, which the local-session readers know
+		// (bridgesid)
+		s.sid = named
 	} else {
-		s.sid = newUUID()
+		s.sid = bridgesid.New()
 		args = append(args, "--session-id", s.sid)
 	}
 	s.projects = filepath.Join(configDir(), "projects")
@@ -341,7 +356,9 @@ func (s *shim) read() {
 				// a panel can be drawn only for a moment (Claude Code
 				// 2.1.316 draws /usage's windows, then the panel again
 				// without them), so each look of it is kept
-				if t := s.grid.text(); usageUsed.MatchString(t) {
+				// A look saying "Refreshing…" is of the figures Claude
+				// Code saved, not kept (#6376).
+				if t := s.grid.text(); usageUsed.MatchString(t) && !usageRefreshing.MatchString(t) {
 					s.panel = t
 				}
 			}
@@ -352,12 +369,19 @@ func (s *shim) read() {
 			}
 		}
 		if err != nil {
+			// a terminal read non-blocking with nothing to read yet is
+			// not its end: Claude Code would fill the terminal and hang
+			// waiting for a reader (#4834)
+			if errors.Is(err, syscall.EAGAIN) {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
 			return
 		}
 	}
 }
 
-var ansi = regexp.MustCompile(`\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[P^_][^\x1b]*\x1b\\|\x1b.`)
+var ansi = lazyre.New(`\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[P^_][^\x1b]*\x1b\\|\x1b.`)
 
 // plain is what Claude Code drew since the screen was last cleared
 // (clearScreen), its escapes taken out.
@@ -366,6 +390,14 @@ func (s *shim) plain() string {
 	b := string(s.screen)
 	s.screenMu.Unlock()
 	return ansi.ReplaceAllString(b, " ")
+}
+
+// dropPanel forgets the looks of /usage's panel kept so far: they are of
+// the figures Claude Code saved, drawn before it said "Refreshing…".
+func (s *shim) dropPanel() {
+	s.screenMu.Lock()
+	s.panel = ""
+	s.screenMu.Unlock()
 }
 
 func (s *shim) clearScreen() {
@@ -457,17 +489,17 @@ func (s *shim) lastScreen() string {
 }
 
 var (
-	trustNo  = regexp.MustCompile(`❯\s*No,\s*exit`)
-	trustYes = regexp.MustCompile(`❯\s*Yes,\s*I trust`)
+	trustNo  = lazyre.New(`❯\s*No,\s*exit`)
+	trustYes = lazyre.New(`❯\s*Yes,\s*I trust`)
 	// the Bypass Permissions disclaimer's Yes (#5042): the disclaimer
 	// pairs the same "No, exit" with it as the trust question does
-	bypassYes = regexp.MustCompile(`❯\s*Yes,\s*I accept`)
+	bypassYes = lazyre.New(`❯\s*Yes,\s*I accept`)
 	// how long a Yes stays drawn before Enter is pressed on it
 	trustSettle = 300 * time.Millisecond
 )
 
 // lastAt is where re's last match in p starts, -1 with none.
-func lastAt(re *regexp.Regexp, p string) int {
+func lastAt(re *lazyre.RE, p string) int {
 	m := re.FindAllStringIndex(p, -1)
 	if len(m) == 0 {
 		return -1
@@ -500,7 +532,7 @@ var errUntrusted = errors.New(Untrusted + ", which only its user answers")
 // signIn is what Claude Code's interactive mode shows where it is not
 // signed in, as -p may be (CLAUDE_CODE_OAUTH_TOKEN, a container whose
 // ~/.claude.json has no onboarding done): nothing the helper may answer.
-var signIn = regexp.MustCompile(`Select login method|Log in with your Claude account|claude\.ai/oauth/authorize`)
+var signIn = lazyre.New(`Select login method|Log in with your Claude account|claude\.ai/oauth/authorize`)
 
 // The screens Claude Code's interactive mode shows where its onboarding
 // isn't done (a config folder only -p was run in, or one signed in where
@@ -514,8 +546,8 @@ var signIn = regexp.MustCompile(`Select login method|Log in with your Claude acc
 // words, any space between them one: Claude Code draws some by moving the
 // cursor.
 var (
-	firstRun      = regexp.MustCompile(`Security notes:.*Press Enter to continue`)
-	terminalSetup = regexp.MustCompile(`terminal setup\?.*Esc to skip`)
+	firstRun      = lazyre.New(`Security notes:.*Press Enter to continue`)
+	terminalSetup = lazyre.New(`terminal setup\?.*Esc to skip`)
 )
 
 // onboardTries is how often one onboarding screen is answered before the
@@ -704,6 +736,10 @@ func (s *shim) emit(v any) {
 	b, _ := json.Marshal(v)
 	s.outMu.Lock()
 	defer s.outMu.Unlock()
+	if s.held != nil {
+		_, _ = s.held.Write(append(b, '\n'))
+		return
+	}
 	_, _ = s.out.Write(append(b, '\n'))
 }
 
@@ -745,11 +781,20 @@ func (s *shim) input(r io.Reader) error {
 			pieces, err := s.userPieces(m.Message.Content)
 			if err != nil {
 				s.emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true, "session_id": s.sid,
-					"result": "this message can't be pasted into Claude Code's interactive mode: " + err.Error()})
+					"result": Unpastable + err.Error()})
 				continue
 			}
 			err = s.send(pieces)
 			s.dropImages()
+			var unpasted *imageUnpasted
+			var cut *messageCut
+			if errors.As(err, &unpasted) || errors.As(err, &cut) {
+				// the prompt holds the path as words: the turn is told
+				// it failed, for the bridge to ask it as claude -p, and
+				// this Claude Code ends with it
+				s.tell(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true, "session_id": s.sid,
+					"result": Unpastable + err.Error()})
+			}
 			if err != nil {
 				return err
 			}
@@ -805,7 +850,7 @@ func (s *shim) command(name string) error {
 		s.screenMu.Unlock()
 	}()
 	by := time.After(commandWait)
-	last, quiet, drawn, retried := "", time.Now(), false, false
+	last, quiet, drawn, retried, refreshing := "", time.Now(), false, false, false
 	var now, panel string
 	for waiting := true; waiting; {
 		p := s.plain()
@@ -815,7 +860,12 @@ func (s *shim) command(name string) error {
 		}
 		still := time.Since(quiet)
 		loading, failed := usageLoading.MatchString(now), usageFailed.MatchString(now)
-		figures := panel != "" || usageUsed.MatchString(p)
+		// once "Refreshing…" was drawn, what was drawn before it is the
+		// figures Claude Code saved: only the screen as it is now, or a
+		// look of it kept since, has today's. A redraw stalled after its
+		// clear had the saved ones told as today's (#6376).
+		figures := panel != "" || usageUsed.MatchString(p) && !refreshing ||
+			refreshing && usageUsed.MatchString(now) && !usageRefreshing.MatchString(now)
 		switch {
 		case usageStale.MatchString(now) && still >= commandSettle:
 			// the figures drawn are the last ones Claude Code saved,
@@ -827,6 +877,10 @@ func (s *shim) command(name string) error {
 			// Taken once they stood still a second, every read told the
 			// one before it, its time now (jsc9495)
 			s.doing.Store("was still refreshing " + name + "'s figures")
+			if !refreshing {
+				refreshing = true
+				s.dropPanel()
+			}
 		case loading:
 			// the panel is drawn before its figures, which Claude Code
 			// asks Anthropic for: a slow answer kept "Loading usage
@@ -852,7 +906,7 @@ func (s *shim) command(name string) error {
 		// Anything else is waited for only once the panel's tabs are
 		// drawn, and not loading.
 		case figures && still >= commandSettle,
-			(failed || usageDrawn(p) || usageDrawn(now)) && still >= 3*commandSettle:
+			(failed || usageDrawn(p) && !refreshing || usageDrawn(now)) && still >= 3*commandSettle:
 			drawn = true
 		}
 		if drawn {
@@ -870,7 +924,10 @@ func (s *shim) command(name string) error {
 	_, _ = io.WriteString(s.pty, "\x1b")
 	p := s.plain()
 	text := usageText(panel)
-	if panel == "" {
+	switch {
+	case panel == "" && refreshing:
+		text = usageText(now)
+	case panel == "":
 		text = usageText(p)
 	}
 	stale := usageStale.FindString(now)
@@ -921,7 +978,7 @@ func usageDrawn(screen string) bool {
 // limiting requests to the usage page (not your usage limit). Try again
 // in a moment.", "Error: Usage endpoint is rate limited until 12:11am."),
 // which were read as a panel with no window.
-var usageFailed = regexp.MustCompile(`Failed to load usage data|limiting requests to the usage page|Usage endpoint is rate limited`)
+var usageFailed = lazyre.New(`Failed to load usage data|limiting requests to the usage page|Usage endpoint is rate limited`)
 
 // NoUsageWindow is what the helper tells for a /usage panel that loaded
 // with none of the account's windows drawn: each is left out until the
@@ -929,7 +986,7 @@ var usageFailed = regexp.MustCompile(`Failed to load usage data|limiting request
 const NoUsageWindow = "No usage window has started"
 
 // usageWindow is one of the account's windows as usageText tells it.
-var usageWindow = regexp.MustCompile(`(?m)^Current (?:session|week)\b`)
+var usageWindow = lazyre.New(`(?m)^Current (?:session|week)\b`)
 
 // usageNoWindow says whether screen is /usage's panel loaded, its figures
 // told, with none of the account's windows among them: the Usage tab's
@@ -951,11 +1008,11 @@ func usageNoWindow(screen string) bool {
 }
 
 var (
-	usageSession = regexp.MustCompile(`\bSession\b|\bTotal cost:`)
-	usageCurrent = regexp.MustCompile(`\bCurrent (?:session|week)\b`)
+	usageSession = lazyre.New(`\bSession\b|\bTotal cost:`)
+	usageCurrent = lazyre.New(`\bCurrent (?:session|week)\b`)
 	// the panel's "Error: …", however many rows it wraps to, up to the
 	// keys it draws under it ("r to retry · Esc to cancel")
-	usageError = regexp.MustCompile(`\bError: .*?(?: r to retry\b|$)`)
+	usageError = lazyre.New(`\bError: .*?(?: r to retry\b|$)`)
 )
 
 // usagePart is the words of /usage's panel in t (its fields joined) that
@@ -972,7 +1029,7 @@ func usagePart(t string) string {
 	return strings.Join(strings.Fields(usageCost.ReplaceAllString(t[at[0]:], "")), " ")
 }
 
-var usageCost = regexp.MustCompile(`\bTotal cost:.*?\bcache write\b`)
+var usageCost = lazyre.New(`\bTotal cost:.*?\bcache write\b`)
 
 // usageWhy is why /usage's panel told no figures, as it says it: its
 // "Error: …" whole, else what it drew from its tabs on, not Claude Code's
@@ -993,16 +1050,16 @@ func usageWhy(screen string) string {
 // own replies ("Partial usage data", "Could not refresh usage data") are
 // today's, and are told.
 var (
-	usageRefreshing = regexp.MustCompile(`\bRefreshing(?:…|\.\.\.)`)
-	usageStale      = regexp.MustCompile(`Showing last-known usage[^\n]*?\)|Showing last-known usage`)
+	usageRefreshing = lazyre.New(`\bRefreshing(?:…|\.\.\.)`)
+	usageStale      = lazyre.New(`Showing last-known usage[^\n]*?\)|Showing last-known usage`)
 )
 
 var (
-	usageName    = regexp.MustCompile(`^(session|week(?: \([^)]*\))?)`)
-	usageUsed    = regexp.MustCompile(`([0-9.]+)%\s+used`)
-	usageReset   = regexp.MustCompile(`Resets (.*?\))`)
-	usagePanel   = regexp.MustCompile(`\bSettings\b.*\bUsage\b`)
-	usageLoading = regexp.MustCompile(`(?i)\bloading\b`)
+	usageName    = lazyre.New(`^(session|week(?: \([^)]*\))?)`)
+	usageUsed    = lazyre.New(`([0-9.]+)%\s+used`)
+	usageReset   = lazyre.New(`Resets (.*?\))`)
+	usagePanel   = lazyre.New(`\bSettings\b.*\bUsage\b`)
+	usageLoading = lazyre.New(`(?i)\bloading\b`)
 )
 
 // usageText is the plan's allowance as /usage's panel shows it, each
@@ -1213,11 +1270,18 @@ func pasteClean(text string) string {
 func (s *shim) send(pieces []piece) error {
 	s.rowsMu.Lock()
 	before, busy := s.rows, s.busy
+	s.said = []heardRow{} // kept from now on (heard), till send returns
 	s.rowsMu.Unlock()
+	defer s.heardAll()
+	// a row counted (sawRow) while send failed before its check is let out
+	defer s.letHeld()
+	var pasted strings.Builder // the words pasted, to check them whole
+	images := 0
 	marker := 0
 	for i, p := range pieces {
 		var err error
 		if p.image != "" {
+			images++
 			if marker, err = s.pasteImage(s.path(p.image), marker); err != nil {
 				return err
 			}
@@ -1231,6 +1295,8 @@ func (s *shim) send(pieces []piece) error {
 		if i == 0 && len(pieces) == 1 && strings.TrimSpace(p.text) == "" {
 			p.text = "."
 		}
+		pasted.WriteString(p.text)
+		pasted.WriteByte('\n')
 		s.clearScreen()
 		if _, err := io.WriteString(s.pty, "\x1b[200~"+p.text+"\x1b[201~"); err != nil {
 			return err
@@ -1250,7 +1316,7 @@ func (s *shim) send(pieces []piece) error {
 			sent := s.rows > before
 			s.rowsMu.Unlock()
 			if sent {
-				return nil
+				return s.checkWhole(pasted.String(), images)
 			}
 			select {
 			case <-s.rowsCh:
@@ -1265,11 +1331,11 @@ func (s *shim) send(pieces []piece) error {
 	return fmt.Errorf("Claude Code did not take the message: %s", s.lastScreen())
 }
 
-var imageShown = regexp.MustCompile(`\[Image #(\d+)\]`)
+var imageShown = lazyre.New(`\[Image #(\d+)\]`)
 
 // promptRule is a row of the rules Claude Code draws over and under its
 // prompt.
-var promptRule = regexp.MustCompile(`^\s*─{20,}\s*$`)
+var promptRule = lazyre.New(`^\s*─{20,}\s*$`)
 
 // prompt is the prompt as the screen shows it, its words one space apart:
 // the rows between the screen's last two rules, "" with no such rows. A
@@ -1304,7 +1370,7 @@ func (s *shim) prompt() string {
 // lastMark is the number of the mark re matches at the end of the prompt
 // as the screen shows it (prompt), 0 with none: the paste taken last, as
 // a paste goes where the prompt's words end.
-func lastMark(re *regexp.Regexp, prompt string) int {
+func lastMark(re *lazyre.RE, prompt string) int {
 	m := re.FindAllStringSubmatchIndex(prompt, -1)
 	if len(m) == 0 || m[len(m)-1][1] != len(prompt) {
 		return 0
@@ -1314,7 +1380,7 @@ func lastMark(re *regexp.Regexp, prompt string) int {
 }
 
 // textLast is Claude Code's whole mark of a long paste.
-var textLast = regexp.MustCompile(`\[Pasted text #(\d+) \+\d+ lines\]`)
+var textLast = lazyre.New(`\[Pasted text #(\d+) \+\d+ lines\]`)
 
 // path is where Claude Code reads a file of the helper's at path: one in
 // WSL under the distro's mount of the drive.
@@ -1332,7 +1398,7 @@ func (s *shim) path(path string) string {
 // returns the number shown.
 func (s *shim) pasteImage(path string, after int) (int, error) {
 	s.clearScreen()
-	if _, err := io.WriteString(s.pty, "\x1b[200~"+path+"\x1b[201~"); err != nil {
+	if _, err := io.WriteString(s.pty, imagePaste(path, imagePad)); err != nil {
 		return 0, err
 	}
 	by := time.After(pasteWait)
@@ -1344,11 +1410,53 @@ func (s *shim) pasteImage(path string, after int) (int, error) {
 		case <-s.changed:
 		case <-time.After(100 * time.Millisecond):
 		case <-by:
-			return 0, fmt.Errorf("Claude Code did not take an image pasted as its path: %s", s.lastScreen())
+			return 0, &imageUnpasted{s.lastScreen()}
 		case <-s.exited:
 			return 0, fmt.Errorf("Claude Code ended (%v): %s", s.exit, s.lastScreen())
 		}
 	}
+}
+
+// imagePad is how long an image's pasted path is made with spaces after
+// it, sent with no bracketed-paste marks: 0 brackets it. Claude Code takes
+// one read of over 800 characters as a paste with or without the marks
+// (2.1.281 and 2.1.316), and a path with spaces after it as the image
+// alone. On Windows Claude Code reads its console as VT input
+// (ENABLE_VIRTUAL_TERMINAL_INPUT, mode 0x208), and Windows 10's conhost
+// (10.0.19041) drops the marks on the way in, leaving the path as words
+// (ok123now on X, Windows 10 LTSC 21H2; #5061, #5205), so there it is sent
+// padded. The same conhost loses 1024-byte blocks of a longer write
+// (#5205), so the padded path stays under that.
+var imagePad = imagePadOS
+
+// imagePaste is what is written to paste an image's path: bracketed, or
+// with spaces after it up to pad characters, one at least.
+func imagePaste(path string, pad int) string {
+	if pad == 0 {
+		return "\x1b[200~" + path + "\x1b[201~"
+	}
+	return path + strings.Repeat(" ", max(1, pad-utf8.RuneCountInString(path)))
+}
+
+// Unpastable begins the error a turn ends in when its message can't be
+// pasted into the interactive mode: a block it doesn't take, or an image
+// whose path Claude Code didn't take as an image (imageUnpasted). The
+// bridge asks such a turn again as claude -p, which is sent the image
+// itself (ok123now on X: a 64x64 PNG on Windows 10 LTSC 21H2 was answered
+// 502, and the client asked again and again).
+const Unpastable = "this message can't be pasted into Claude Code's interactive mode: "
+
+// imageUnpasted is an image's path pasted that the prompt never showed
+// taken as an image within pasteWait: left as words, as a console whose
+// pasting Claude Code can't tell from typing leaves it.
+type imageUnpasted struct{ screen string }
+
+// ImageNotTaken begins imageUnpasted's words: what the bridge keeps, for
+// the machine's next turns with images to run as claude -p.
+const ImageNotTaken = "Claude Code did not take an image pasted as its path"
+
+func (e *imageUnpasted) Error() string {
+	return ImageNotTaken + ": " + e.screen
 }
 
 // imageTaken is the number of the image the prompt shows taken, numbered
@@ -1373,7 +1481,7 @@ func shownWait(n int) time.Duration {
 	return pasteWait + time.Duration(n/(64<<10))*time.Second
 }
 
-var textShown = regexp.MustCompile(`\[Pasted text #(\d+)`)
+var textShown = lazyre.New(`\[Pasted text #(\d+)`)
 
 // shown waits for the prompt to show pasted text: its last words, or
 // Claude Code's "[Pasted text #<n>" for a long one, numbered past after,
@@ -1447,11 +1555,20 @@ func (s *shim) transcript() string {
 // result (renderParts).
 const userMark = "[user message]\n"
 
+// sawRow counts a message's row. While one sent is checked (said isn't
+// nil), what comes after the row is held from here, on the transcript's
+// own reader: the reply is read right after its message's row, and held
+// only once send saw the count, a reply got out before its message was
+// checked whole (#6887).
 func (s *shim) sawRow() {
 	s.rowsMu.Lock()
 	s.rows++
 	s.busy = true
+	checking := s.said != nil
 	s.rowsMu.Unlock()
+	if checking {
+		s.hold()
+	}
 	select {
 	case s.rowsCh <- struct{}{}:
 	default:
@@ -1521,14 +1638,6 @@ func (s *shim) turnOver() {
 	s.rowsMu.Lock()
 	s.busy = false
 	s.rowsMu.Unlock()
-}
-
-func newUUID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	b[6] = b[6]&0x0f | 0x40
-	b[8] = b[8]&0x3f | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
 // interactiveArgs are `claude -p` arguments made the interactive mode's:

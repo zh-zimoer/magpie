@@ -137,6 +137,18 @@ func TestApplyGroupPairs(t *testing.T) {
 			t.Errorf("context=%s: %d %v", c.v, g.Context, err)
 		}
 	}
+	// compact=: where agents compact on the group (NovaStudiosss on X)
+	for _, c := range []struct {
+		v    string
+		want int
+	}{{"160k", 160000}, {"1m", 1000000}, {"off", 0}, {"", 0}} {
+		if err := applyGroupPairs(&g, []string{"compact=" + c.v}, resolve, false); err != nil || g.Compact != c.want {
+			t.Errorf("compact=%s: %d %v", c.v, g.Compact, err)
+		}
+	}
+	if err := applyGroupPairs(&g, []string{"compact=lots"}, resolve, false); err == nil {
+		t.Error("compact=lots was accepted")
+	}
 	// listed=no: its models offered through the group alone (#1783)
 	if err := applyGroupPairs(&g, []string{"listed=no"}, resolve, false); err != nil || !g.Unlists {
 		t.Fatalf("listed=no: %v %v", g.Unlists, err)
@@ -278,8 +290,8 @@ func TestCloseMatches(t *testing.T) {
 	}
 }
 
-// magpie group set <id> id=<new>: a found group loses its auto- prefix and
-// stays removed under the old id.
+// magpie group set <id> id=<new>: a found group loses its auto- prefix,
+// and its old id finds it under the new one, never as a second group.
 func TestGroupSetID(t *testing.T) {
 	groupsHome(t)
 	if _, err := setGroup("auto-m", []string{"id=Not Slug!"}); err == nil {
@@ -295,8 +307,10 @@ func TestGroupSetID(t *testing.T) {
 	if _, _, ok := provider.Resolve("group/m"); !ok {
 		t.Fatal("group/m not in the catalog")
 	}
-	if _, _, ok := provider.FindGroup("group/auto-m"); ok {
-		t.Fatal("auto-m is back beside m")
+	// the old id still answers, with the renamed group (00af08e7b), never
+	// a found auto-m of its own beside it
+	if old, _, ok := provider.FindGroup("group/auto-m"); !ok || old.ID != "m" {
+		t.Fatalf("group/auto-m: %v %+v", ok, old)
 	}
 	if _, err := addGroup("Other", []string{"models=a/only-a"}); err != nil {
 		t.Fatal(err)

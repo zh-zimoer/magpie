@@ -52,6 +52,32 @@ func needsSignIn(agent string, isPlugin bool, lapsed string) bool {
 	return agent == "claude" || agent == "copilot" || isPlugin || signInGone.MatchString(lapsed)
 }
 
+// SignInNeeded says every account of p in use has to be signed in again,
+// as the Providers page shows it (needsSignIn): a model of p is asked of
+// none of them, each refused for its sign-in. False when one is usable,
+// or none is in use or known.
+func (p Provider) SignInNeeded() bool {
+	a := p.Account
+	if a == nil {
+		return false
+	}
+	agent, isPlugin := a.Agent, false
+	if _, ok := PluginOf(p.ID); ok && p.IsPlugin() {
+		agent, isPlugin = p.ID, true // its accounts go by the provider's id
+	}
+	used := false
+	for _, l := range Logins(agent) {
+		if !l.On && !l.Active {
+			continue
+		}
+		if !needsSignIn(a.Agent, isPlugin, l.Lapsed) {
+			return false
+		}
+		used = true
+	}
+	return used
+}
+
 // claudeEndsWithin is how long before a Claude sign-in ends it is told of:
 // Claude Code's own warning's three days.
 const claudeEndsWithin = 3 * 24 * time.Hour
@@ -82,6 +108,11 @@ type signInState struct {
 // whether it has to be signed in again, and when a Claude one's sign-in
 // ends.
 func signInStates() []signInState {
+	// one look, held: each account's PluginOf and Logins built the
+	// plugins' list and every login again, 2.5 MB a look with real
+	// accounts, twice every two minutes (the app's alert and the
+	// gateway's hooks each look)
+	defer Hold()()
 	ends := map[string]time.Time{}
 	var out []signInState
 	for _, p := range Accounts() {
@@ -206,4 +237,15 @@ func WatchSignIns(ctx context.Context, send func(SignInAlert)) {
 		}
 		t.Reset(signInAlertEvery)
 	}
+}
+
+// SignInHooksPath keeps what the gateway's request hooks were told, apart
+// from the app's notifications' marks (signInAlertPath): the magpie
+// serving the gateway tells its hooks, and the app the user, each once.
+func SignInHooksPath() string { return filepath.Join(filepath.Dir(Path()), "signin-hooks.json") }
+
+// SignInAlertsAt is one look at the accounts: the sign-in alerts due, as
+// WatchSignIns tells them, with what was told kept in path.
+func SignInAlertsAt(path string) []SignInAlert {
+	return checkSignIns(path, signInStates(), time.Now())
 }

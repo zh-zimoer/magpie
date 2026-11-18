@@ -42,8 +42,11 @@ type Call struct {
 	Upstream  string `json:"upstream,omitempty"`
 	AccountID string `json:"account_id,omitempty"`
 	UserID    string `json:"user_id,omitempty"`
-	Error     string `json:"error,omitempty"`      // Claude: the API error's kind (rate_limit, server_error …); such a call has no tokens
-	ErrorText string `json:"error_text,omitempty"` // its message, the first 400 characters
+	// Credits: what the call cost in its plan's own credits, as the file
+	// says (Qoder's, which writes no tokens of its own models)
+	Credits   *float64 `json:"credits,omitempty"`
+	Error     string   `json:"error,omitempty"`      // Claude: the API error's kind (rate_limit, server_error …); such a call has no tokens
+	ErrorText string   `json:"error_text,omitempty"` // its message, the first 400 characters
 	// Codex: the turn's own figures, set only when the turn made just this call
 	TTFT int64 `json:"ttft_ms,omitempty"`
 	// Compaction is Codex's explicit marker that this response compacted the context.
@@ -70,7 +73,7 @@ type Call struct {
 // what it takes to read on from off.
 type callFile struct {
 	Claude      *claudeUsageState
-	ContentHash string
+	ContentHash digest
 	dirty       map[int]bool
 	// readSize is the size of the file being read (prepareCalls), for
 	// growCalls
@@ -80,7 +83,7 @@ type callFile struct {
 	Size     int64
 	Mod      int64  // unix nanoseconds
 	Off      int64  // after the last whole line read
-	Head     string // hash of the prefix, to tell one replaced from one grown
+	Head     digest // of the prefix, to tell one replaced from one grown
 	HeadSize int
 	Path     string
 	Calls    []Call
@@ -266,7 +269,7 @@ func callsFor(since time.Time, session, agent string) []Call {
 	capacity := 0
 	callsMu.Lock()
 	for _, f := range files {
-		if since.IsZero() || !f.mod.Before(since) {
+		if since.IsZero() || !f.mod.Before(modOf(since)) {
 			capacity += callCounts[f.path]
 		}
 	}
@@ -276,7 +279,7 @@ func callsFor(since time.Time, session, agent string) []Call {
 	}
 	out := make([]Call, 0, capacity)
 	for _, f := range files {
-		if !since.IsZero() && f.mod.Before(since) {
+		if !since.IsZero() && f.mod.Before(modOf(since)) {
 			continue
 		}
 		st := readCalls(f)
@@ -315,7 +318,7 @@ func callFilesWith(codex []file) []file { return distinctOf(callFileLists(codex)
 // the callers that list more add theirs and keep each path once, over
 // all of them (distinctOf), instead of copying callFilesWith's again.
 func callFileLists(codex []file) [][]file {
-	lists := [][]file{ccFiles("claude", ClaudeDir())}
+	lists := [][]file{claudeFiles()}
 	for _, d := range desktopReadDirs() {
 		// Cowork keeps a Claude Code folder of its own for each session
 		homes, _ := SessionGlob(filepath.Join(d, "local-agent-mode-sessions", "*", "*", "local_*", ".claude"))
@@ -330,12 +333,15 @@ func callFileLists(codex []file) [][]file {
 // read whole rather than line by line: OpenCode's (#680) and ZCode's, whose
 // calls are rows of their database or their JSON files; and WorkBuddy's, whose usage lines repeat a reply's id as it
 // goes on, as CodeBuddy Code's do (#1779); and MiniMax Code's, whose messages
-// file a later generation of its history may replace (#1605). Kimi Code's
+// file a later generation of its history may replace (#1605); and Droid's, whose spend is
+// only a running total in each session's settings (calls_droid.go). Kimi Code's
 // (#1607), Pi's and omp's (#1951) and Grok Build's (#4423) are lines of a
 // file only appended to, read on as callFiles' are; DeepSeek Harness's, a
 // file only appended to that may be packed in zstd frames, is read on
 // from the frame it was left in (readDshCalls). Every agent here needs an
-// entry in wholeCallReaders, lineCallReaders or resumeCallReaders.
+// entry in wholeCallReaders, lineCallReaders or resumeCallReaders, but
+// Qoder's and Qoder CN's (qoder.go), whose files are Claude Code's and read
+// as Claude Code's are (ccCallAgent).
 func callSources() []file { return callSourcesWith(codexFiles()) }
 
 // callSourcesWith is callSources with codex the rollouts codexFiles found.
@@ -345,9 +351,14 @@ func callSourcesWith(codex []file) []file { return callSourcesInto(nil, codex) }
 func callSourcesInto(out []file, codex []file) []file {
 	lists := append(callFileLists(codex), openCodeCallFiles(), zcodeCallFiles(), dshCallFiles(),
 		minimaxCallFiles(), kimiCallFiles(), wslFiles("kimi"), piCallFiles(), codebuddyCallFiles(), workbuddyAIFiles(),
-		agyCallFiles(),                        // #2097
-		antigravityCallFiles(),                // #2190
-		workbuddyCallFiles(), grokCallFiles()) // #4423
+		agyCallFiles(),                               // #2097
+		antigravityCallFiles(),                       // #2190
+		wslFiles("antigravity"), wslCallFiles("agy"), // @guyng35955 on X
+		devinCallFiles(),                      // aohan0905 on X
+		droidFiles(),                          // _meouwu on X: its settings' totals (calls_droid.go)
+		workbuddyCallFiles(), grokCallFiles(), // #4423
+		// Claude Code's lines, read by claudeCallLine (eating_dream on X)
+		ccFiles("qoder", QoderDir("qoder")), ccFiles("qoder-cn", QoderDir("qoder-cn")))
 	if out == nil {
 		return allowed(distinctOf(lists...))
 	}
@@ -386,13 +397,13 @@ func prepareCalls(f file, old *callFile, owned bool) *callFile {
 	}
 	// Disk shards keep final calls, not message block/tool maps. A changed
 	// Claude source reconstructs its transient revision index after restart.
-	if (f.agent == "claude" || f.agent == "claude-desktop") && old != nil && old.Claude == nil {
+	if ccCallAgent(f.agent) && old != nil && old.Claude == nil {
 		old = nil
 	}
 
 	head := headOf(f.path)
 	var st *callFile
-	if old != nil && !packed(f.path) && f.size >= old.Size && old.Off <= f.size && sameHead(head, old.Head, old.HeadSize) && old.ContentHash != "" && prefixHash(f.path, old.Off) == old.ContentHash {
+	if old != nil && !packed(f.path) && f.size >= old.Size && old.Off <= f.size && sameHead(head, old.Head, old.HeadSize) && old.ContentHash != (digest{}) && prefixHash(f.path, old.Off) == old.ContentHash {
 		if owned {
 			st = old.cloneState()
 		} else {
@@ -411,7 +422,7 @@ func prepareCalls(f file, old *callFile, owned bool) *callFile {
 		}
 	}
 	st.dirty = map[int]bool{}
-	st.Head, st.HeadSize, st.Path = hashHead(head), len(head), f.path
+	st.Head, st.HeadSize, st.Path = headDigest(head), len(head), f.path
 	st.readSize = f.size
 	return st
 }
@@ -694,8 +705,35 @@ type ccCall struct {
 			CacheRead  int              `json:"cache_read_input_tokens"`
 			CacheWrite int              `json:"cache_creation_input_tokens"`
 			Creation   *ccCacheCreation `json:"cache_creation"`
+			Credits    ccNum            `json:"credits"`
 		} `json:"usage"`
 	} `json:"message"`
+}
+
+// ccNum is a number field that reads as unset when a file holds something
+// else there, so a line is never lost for it.
+type ccNum struct {
+	V   float64
+	Set bool
+}
+
+func (n *ccNum) UnmarshalJSON(b []byte) error {
+	var v float64
+	if json.Unmarshal(b, &v) == nil && !bytes.Equal(b, []byte("null")) {
+		*n = ccNum{v, true}
+	}
+	return nil
+}
+
+// ccCallAgent says whether agent's session files are Claude Code's, its
+// calls read by claudeCallLine: Claude Code's and Desktop's own, and
+// Qoder's (qoder.go), whose lines are Claude Code's.
+func ccCallAgent(agent string) bool {
+	switch agent {
+	case "claude", "claude-desktop", "qoder", "qoder-cn":
+		return true
+	}
+	return false
 }
 
 // claudeCallLine notes the call an assistant line is (a block of) in the
@@ -942,7 +980,15 @@ func claudeCall(st *callFile, b []byte, l *ccCall) {
 		}
 		c.Model = st.str(model)
 		c.Tokens = ccTokens(u.Input, u.Output, u.CacheRead, u.CacheWrite, u.Creation)
-		if c.Tokens.zero() && m.Usage == nil {
+		if u.Credits.Set && (st.Agent == "qoder" || st.Agent == "qoder-cn") {
+			// Qoder writes its own models' replies with every count 0
+			// unless QODER_EXPOSE_TOKEN_USAGE is set (qodercli 1.1.0 on,
+			// the app's worker too), and the credits the reply cost: a
+			// call of no tokens known, counted by what it cost
+			v := u.Credits.V
+			c.Credits = &v
+		}
+		if c.Tokens.zero() && m.Usage == nil && c.Credits == nil {
 			return
 		}
 		if !asked.IsZero() && at.After(asked) {
@@ -955,6 +1001,10 @@ func claudeCall(st *callFile, b []byte, l *ccCall) {
 			previous := &st.Calls[i]
 			changed := previous.RequestID != m.Request
 			previous.RequestID = m.Request
+			// Qoder's counts stay 0 while what the reply cost is told
+			if c.Credits != nil && (previous.Credits == nil || *previous.Credits != *c.Credits) {
+				previous.Credits, changed = c.Credits, true
+			}
 			// A new block can finish a reply with unchanged usage. Retain
 			// its duration/content boundary without moving usage across days.
 			if newBlock && m.Usage.Model == c.Model && m.Usage.Tokens == c.Tokens &&
@@ -1292,18 +1342,18 @@ func (st *callFile) codexCompact(i int) {
 }
 
 func hashHead(head string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(head))) }
-func sameHead(head, hash string, size int) bool {
-	return size >= 0 && len(head) >= size && hashHead(head[:size]) == hash
+func sameHead(head string, hash digest, size int) bool {
+	return size >= 0 && len(head) >= size && headDigest(head[:size]) == hash
 }
 
 // prefixHash checks distributed windows of the indexed prefix. Small files
-// are checked in full. The version tag invalidates earlier full-file hashes.
+// are checked in full.
 // Rewrites outside the sampled windows can go undetected; appends cost at most
 // 64 KiB of reads per fingerprint regardless of the session's length.
-func prefixHash(path string, n int64) string {
+func prefixHash(path string, n int64) digest {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return digest{}
 	}
 	defer f.Close()
 	h := sha256.New()
@@ -1314,7 +1364,7 @@ func prefixHash(path string, n int64) string {
 	defer hashBufs.Put(buf)
 	if n <= window*samples {
 		if _, err = io.ReadFull(f, buf[:n]); err != nil {
-			return ""
+			return digest{}
 		}
 		h.Write(buf[:n])
 	} else {
@@ -1322,12 +1372,12 @@ func prefixHash(path string, n int64) string {
 			off := (n - window) * i / (samples - 1)
 			// A full window may come back with io.EOF at the file's end.
 			if k, _ := f.ReadAt(buf[:window], off); int64(k) < window {
-				return ""
+				return digest{}
 			}
 			h.Write(buf[:window])
 		}
 	}
-	return fmt.Sprintf("sample-v1:%x", h.Sum(nil))
+	return digest(h.Sum(nil)[:16])
 }
 
 var hashBufs = sync.Pool{New: func() any { return new([64 << 10]byte) }}
@@ -1376,7 +1426,7 @@ func callSourcesOf(fs []file) []CallSource {
 	pruneCalls(fs)
 	out := make([]CallSource, 0, len(fs))
 	for _, f := range fs {
-		out = append(out, CallSource{f.path, f.key, f.agent, f.size, f.mod})
+		out = append(out, CallSource{f.path, f.key, f.agent, f.size, f.mod.Time()})
 	}
 	return out
 }
@@ -1387,7 +1437,7 @@ func ReadCallSource(s CallSource) []Call {
 	if !Reads(s.Agent) {
 		return nil
 	}
-	st := readCalls(file{path: s.Path, key: s.Key, agent: s.Agent, size: s.Size, mod: s.Modified})
+	st := readCalls(file{path: s.Path, key: s.Key, agent: s.Agent, size: s.Size, mod: modOf(s.Modified)})
 	// Requests retains its own compact snapshot. Keeping the expanded parser's
 	// calls as well doubles residency, especially for long active sessions. The
 	// append-frame shard still carries the continuation for the next read.

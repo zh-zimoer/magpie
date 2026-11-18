@@ -28,6 +28,7 @@ let apiDown = false, pagesDown = false;
 // API serves the same files (2026-11-08)
 let downloadsDown = false;
 const seen = [];
+const SIG64 = "OT7nCVnsnONdQsBC4rfHcpqouwWLfavkbv3FCdPOBjGTBdHTefDVHQdZe8w1T5nOwlvA/S5a2EiI9zC9yOOcBQ==";
 const FEED = `<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
   <entry>
@@ -87,11 +88,13 @@ globalThis.fetch = async (u, init = {}) => {
   const gh = (tag) => ({ tag_name: tag, body: BODIES[tag], html_url: "https://github.com/r/" + tag, published_at: "2026-10-01T00:00:00Z", draft: false, prerelease: false, assets: [
       { name: "magpie-linux-amd64", size: 1, browser_download_url: "https://dl/x", url: "https://api.github.com/repos/yetone/magpie-releases/releases/assets/1" },
       { name: "SHA256SUMS", size: 1, browser_download_url: "https://dl/sums", url: "https://api.github.com/repos/yetone/magpie-releases/releases/assets/2" },
+      { name: "SHA256SUMS.sig", size: 88, browser_download_url: "https://dl/sig", url: "https://api.github.com/repos/yetone/magpie-releases/releases/assets/3" },
     ] });
   if (u.endsWith("/releases/tags/v0.1.3")) return Response.json(gh("v0.1.3"));
   if (u.endsWith("/releases/latest")) return Response.json(gh("v0.1.3"));
   if (u.includes("/releases?per_page=")) return Response.json(Object.keys(BODIES).map(gh));
   if (u.endsWith("/SHA256SUMS")) return new Response("abc  magpie-linux-amd64\n");
+  if (u.endsWith("/SHA256SUMS.sig")) return new Response(SIG64 + "\n");
   return new Response("not found", { status: 404 });
 };
 
@@ -114,6 +117,15 @@ test("latest: the English alone without lang, the Chinese with zh", async () => 
   }
   // asked in Chinese first, the edge's copy still has both
   assert.equal((await get("/api/latest")).body.notes, EN);
+});
+
+// The app checks the signature itself (internal/update/signed.go); the feed
+// only carries the signed list and the signature, and never lists the
+// signature as a file to download.
+test("latest: carries SHA256SUMS and its signature, and the signature is no file", async () => {
+  const { body } = await get("/api/latest");
+  assert.deepEqual(body.signed, { sums: "abc  magpie-linux-amd64\n", sig: SIG64 });
+  assert.deepEqual(Object.keys(body.assets), ["magpie-linux-amd64"]);
 });
 
 test("notes: each release in the language, English where it has no Chinese", async () => {
@@ -185,6 +197,13 @@ test("docs: the bare docs paths open each language's guide", async () => {
     const res = await worker.fetch(new Request("https://usemagpie.ai" + from), env, ctx);
     assert.equal(new URL(res.headers.get("Location"), "https://usemagpie.ai").pathname, to, from);
   }
+});
+
+test("site: /favicon.ico goes to the icon the pages link", async () => {
+  const env = { ASSETS: { fetch: async () => new Response("asset") } };
+  const res = await worker.fetch(new Request("https://usemagpie.ai/favicon.ico"), env, ctx);
+  assert.equal(res.status, 301);
+  assert.equal(res.headers.get("Location"), "https://usemagpie.ai/favicon.png");
 });
 
 test("docs: the MCP hub's old pages go to the MCP router's, keeping the query", async () => {
@@ -729,6 +748,17 @@ test("seo: llms.txt lists every English docs page and links only to listed pages
   for (const f of docs) assert.ok(links.includes(`https://usemagpie.ai/docs/${f.slice(0, -5)}`), `llms.txt misses docs/${f}`);
 });
 
+test("seo: llms-full.txt is current and holds every English docs page", async () => {
+  const { readFile, readdir } = await import("node:fs/promises");
+  const { build } = await import("./llms-full.mjs");
+  const pub = new URL("./public/", import.meta.url);
+  const txt = await readFile(new URL("llms-full.txt", pub), "utf8");
+  assert.equal(txt, await build(), "public/llms-full.txt is stale: run `node llms-full.mjs` in site/");
+  const docs = (await readdir(new URL("docs/", pub))).filter((f) => f.endsWith(".html") && f !== "contributors.html");
+  for (const f of docs) assert.ok(txt.includes(`Source: https://usemagpie.ai/docs/${f.slice(0, -5)}\n`), `llms-full.txt misses docs/${f}`);
+  assert.doesNotMatch(txt.replace(/^```\n[\s\S]*?\n```$/gm, ""), /<\/?(p|div|span|li|td|code|a)\b/, "llms-full.txt has HTML left outside its code blocks");
+});
+
 test("seo: the home page's structured data parses and its title is in every language", async () => {
   const { readFile } = await import("node:fs/promises");
   const { LANGS } = await import("./i18n.js");
@@ -887,5 +917,74 @@ test("r2: the five-minute cron copies the newest release's files from github.com
     globalThis.fetch = was;
     downloadsDown = false;
     store.clear();
+  }
+});
+
+test("plugins/tagged: the dist branch's list passed on, jsDelivr and the last copy when it fails", async () => {
+  const was = globalThis.fetch;
+  const list = { version: 1, plugins: [{ repo: "a/b", spec: "github:a/b", stars: 3 }] };
+  let rawDown = false, cdnDown = false;
+  globalThis.fetch = async (u) => {
+    u = String(u);
+    if (u.startsWith("https://raw.githubusercontent.com/magpie-community/plugins/dist/")) return rawDown ? new Response("x", { status: 503 }) : Response.json(list);
+    if (u.startsWith("https://cdn.jsdelivr.net/gh/magpie-community/plugins@dist/")) return cdnDown ? new Response("x", { status: 503 }) : Response.json(list);
+    throw new Error("a test reached " + u);
+  };
+  try {
+    store.delete("https://usemagpie.ai/__v2/tagged");
+    const ask = () => worker.fetch(new Request("https://usemagpie.ai/api/plugins/tagged"), {}, ctx);
+    let res = await ask();
+    assert.equal(res.status, 200);
+    assert.deepEqual((await res.json()).plugins, list.plugins);
+    store.delete("https://usemagpie.ai/__v2/tagged");
+    rawDown = true;
+    assert.equal((await (await ask()).json()).plugins[0].repo, "a/b", "jsDelivr stands in");
+    store.delete("https://usemagpie.ai/__v2/tagged");
+    cdnDown = true;
+    assert.equal((await (await ask()).json()).plugins[0].repo, "a/b", "the last whole copy stands in");
+    store.delete("https://usemagpie.ai/__v2/tagged-good");
+    assert.equal((await ask()).status, 503);
+  } finally {
+    globalThis.fetch = was;
+  }
+});
+
+test("plugins/readme: a plugin's kept README passed on, from jsDelivr when raw fails, 404 when none", async () => {
+  const was = globalThis.fetch;
+  const asked = [];
+  let rawDown = false;
+  globalThis.fetch = async (u) => {
+    u = String(u);
+    asked.push(u);
+    const raw = "https://raw.githubusercontent.com/magpie-community/plugins/dist/readmes/";
+    const cdn = "https://cdn.jsdelivr.net/gh/magpie-community/plugins@dist/readmes/";
+    for (const [base, down] of [[raw, rawDown], [cdn, false]]) {
+      if (!u.startsWith(base)) continue;
+      if (down) return new Response("x", { status: 503 });
+      if (u.endsWith("/rsshub-plugin.md")) return new Response("# kept");
+      if (u.endsWith("/%40sc/scoped.md")) return new Response("# scoped");
+      if (u.endsWith("/github/o/r.md")) return new Response("# repo");
+      return new Response("nope", { status: 404 });
+    }
+    throw new Error("a test reached " + u);
+  };
+  try {
+    const ask = (n) => worker.fetch(new Request("https://usemagpie.ai/api/plugins/readme?name=" + encodeURIComponent(n)), {}, ctx);
+    for (const [n, want] of [["rsshub-plugin", "# kept"], ["@sc/scoped", "# scoped"], ["github:o/r", "# repo"]]) {
+      store.delete("https://usemagpie.ai/__v2/readme/" + (n.startsWith("github:") ? "github/" + n.slice(7) : n));
+      const res = await ask(n);
+      assert.equal(res.status, 200, n);
+      assert.equal(await res.text(), want);
+    }
+    const before = asked.length;
+    assert.equal(await (await ask("rsshub-plugin")).text(), "# kept");
+    assert.equal(asked.length, before, "the edge keeps it");
+    store.delete("https://usemagpie.ai/__v2/readme/rsshub-plugin");
+    rawDown = true;
+    assert.equal(await (await ask("rsshub-plugin")).text(), "# kept", "jsDelivr stands in");
+    assert.equal((await ask("missing-one")).status, 404);
+    for (const bad of ["../x", "github:../../x", "", "A B"]) assert.equal((await ask(bad)).status, 400, bad);
+  } finally {
+    globalThis.fetch = was;
   }
 });

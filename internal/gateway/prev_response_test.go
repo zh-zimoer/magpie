@@ -292,3 +292,168 @@ func TestKeptTurnOwnsItsInput(t *testing.T) {
 		t.Fatalf("own %d, want the %d bytes kept", kept.own, n)
 	}
 }
+
+// foreignUp is an upstream that, once foreign is set, turns away a
+// previous_response_id or an input item id another of its resources made,
+// as Azure OpenAI behind a relay spreading one key over several resources
+// does (hykql on Discord), and answers each turn with reasoning and a
+// message that carry ids.
+func foreignUp(t *testing.T, foreign *atomic.Bool) *prevUp {
+	return newPrevUp(t, func(n int, body []byte) (int, string, string) {
+		s := string(body)
+		if foreign.Load() && (strings.Contains(s, "previous_response_id") || strings.Contains(s, `"id":"msg_`) || strings.Contains(s, `"id":"rs_`)) {
+			return 400, "application/json", `{"error":{"message":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.","type":"invalid_request_error"}}`
+		}
+		return 200, "application/json", fmt.Sprintf(`{"id":"resp_up%d","object":"response","status":"completed","output":[{"type":"reasoning","id":"rs_%d","summary":[]},{"type":"reasoning","id":"rs_e%d","summary":[],"encrypted_content":"sealed%d"},{"type":"message","id":"msg_%d","role":"assistant","content":[{"type":"output_text","text":"answer %d"}]}],"usage":{"input_tokens":3,"output_tokens":1}}`, n, n, n, n, n, n)
+	})
+}
+
+// wholeWithoutIDs fails unless q, a request's body, is the conversation
+// whole with none of the earlier reply's ids, its sealed reasoning kept.
+func wholeWithoutIDs(t *testing.T, q map[string]any) {
+	t.Helper()
+	in, _ := json.Marshal(q["input"])
+	s := string(in)
+	if _, has := q["previous_response_id"]; has {
+		t.Fatalf("previous_response_id still sent: %.400s", s)
+	}
+	if strings.Contains(s, `"id":"msg_`) || strings.Contains(s, `"id":"rs_`) {
+		t.Fatalf("the earlier reply's ids still sent: %.400s", s)
+	}
+	for _, want := range []string{"first turn", "answer 1", "sealed1", "second turn"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("%q missing from the whole: %.400s", want, s)
+		}
+	}
+}
+
+// An upstream that keeps responses, behind which another resource
+// answers: the delta naming the earlier response is turned away as
+// another resource's, and the conversation goes whole, its items naming
+// nothing, rather than the 400 reaching the client.
+func TestPreviousResponseOtherResourceDeltaSentWhole(t *testing.T) {
+	defer func(old func(provider.Provider) bool) { prevKeptBy = old }(prevKeptBy)
+	prevKeptBy = func(p provider.Provider) bool { return p.ID == "fake" }
+	var foreign atomic.Bool
+	up := foreignUp(t, &foreign)
+	s := prevSandbox(t, provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}, Responses: up.srv.URL + "/v1"})
+	id := responseID(t, askResponses(t, s, "", `{"model":"fake/m1","input":"first turn"}`))
+	foreign.Store(true)
+	rec := askResponses(t, s, "", `{"model":"fake/m1","previous_response_id":"`+id+`","input":"second turn"}`)
+	if rec.Code != 200 {
+		t.Fatalf("client given %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := up.calls(); n != 3 {
+		t.Fatalf("%d upstream calls, want the delta and the whole once", n)
+	}
+	wholeWithoutIDs(t, up.last())
+}
+
+// The same behind a provider that doesn't keep responses, sent the whole
+// each turn: the items magpie brought back are what is turned away, and
+// they go once more without their ids. A refusal with nothing left to
+// take out is passed on, not asked again as it was.
+func TestPreviousResponseOtherResourceWholeSentWithoutIDs(t *testing.T) {
+	defer func(old func(provider.Provider) bool) { prevKeptBy = old }(prevKeptBy)
+	prevKeptBy = func(provider.Provider) bool { return false }
+	var foreign atomic.Bool
+	up := foreignUp(t, &foreign)
+	s := prevSandbox(t, provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}, Responses: up.srv.URL + "/v1"})
+	id := responseID(t, askResponses(t, s, "", `{"model":"fake/m1","input":"first turn"}`))
+	foreign.Store(true)
+	rec := askResponses(t, s, "", `{"model":"fake/m1","previous_response_id":"`+id+`","input":"second turn"}`)
+	if rec.Code != 200 {
+		t.Fatalf("client given %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := up.calls(); n != 3 {
+		t.Fatalf("%d upstream calls, want the whole and the whole without ids", n)
+	}
+	wholeWithoutIDs(t, up.last())
+
+	// the client's own item with an id: nothing of magpie's to take out
+	rec = askResponses(t, s, "", `{"model":"fake/m1","input":[{"type":"message","id":"msg_mine","role":"user","content":"hi"}]}`)
+	if rec.Code != 400 || up.calls() != 4 {
+		t.Fatalf("client given %d after %d calls, want the 400 after one", rec.Code, up.calls()-3)
+	}
+}
+
+// A client that replays its whole conversation itself, store false and no
+// previous_response_id (Codex's store-off history), meets the same
+// cross-resource refusal of the ids it echoes back: the ids that can go
+// without one go, the conversation and its call pairing kept, asked again
+// once (#6320).
+func TestClientWholeReplayForeignIDsAskedWithoutThem(t *testing.T) {
+	var foreign atomic.Bool
+	up := foreignUp(t, &foreign)
+	s := prevSandbox(t, provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}, Responses: up.srv.URL + "/v1"})
+	foreign.Store(true)
+	replay := `{"model":"fake/m1","store":false,"stream":true,"input":[` +
+		`{"role":"user","content":"Remember 47."},` +
+		`{"type":"reasoning","id":"rs_9","summary":[],"encrypted_content":"sealed9"},` +
+		`{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Remembered."}]},` +
+		`{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}"},` +
+		`{"type":"function_call_output","id":"fco_1","call_id":"call_1","output":"47"},` +
+		`{"role":"user","content":"What was the number?"}]}`
+	rec := askResponses(t, s, "", replay)
+	if rec.Code != 200 {
+		t.Fatalf("client given %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := up.calls(); n != 2 {
+		t.Fatalf("%d upstream calls, want the refusal and the replay without ids", n)
+	}
+	in, _ := json.Marshal(up.last()["input"])
+	sent := string(in)
+	if _, has := up.last()["previous_response_id"]; has {
+		t.Fatalf("previous_response_id still sent: %.400s", sent)
+	}
+	for _, gone := range []string{`"id":"msg_1"`, `"id":"rs_9"`, `"id":"fc_1"`, `"id":"fco_1"`} {
+		if strings.Contains(sent, gone) {
+			t.Fatalf("%s still sent: %.500s", gone, sent)
+		}
+	}
+	for _, want := range []string{"Remember 47.", "sealed9", "Remembered.", `"call_id":"call_1"`, "What was the number?"} {
+		if !strings.Contains(sent, want) {
+			t.Fatalf("%q missing from the replay: %.500s", want, sent)
+		}
+	}
+	if got := strings.Count(sent, `"call_id":"call_1"`); got != 2 {
+		t.Fatalf("call pairing %d times, want the call and its output: %.500s", got, sent)
+	}
+}
+
+// One item of the client's own with an id is not a replayed conversation:
+// it goes as it came, the refusal with it (#6320, beside
+// TestPreviousResponseOtherResourceWholeSentWithoutIDs).
+func TestClientWholeSingleIDedItemStaysAsItCame(t *testing.T) {
+	var foreign atomic.Bool
+	up := foreignUp(t, &foreign)
+	s := prevSandbox(t, provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}, Responses: up.srv.URL + "/v1"})
+	foreign.Store(true)
+	rec := askResponses(t, s, "", `{"model":"fake/m1","store":false,"input":[{"type":"message","id":"msg_mine","role":"user","content":"hi"}]}`)
+	if rec.Code != 400 || up.calls() != 1 {
+		t.Fatalf("client given %d after %d calls, want the 400 after one", rec.Code, up.calls())
+	}
+}
+
+// A conversation going on with another provider than the one whose reply
+// it holds goes without that reply's ids at once: the other never made
+// them. The same provider and key is sent them as before.
+func TestPreviousResponseToAnotherProviderSentWithoutIDs(t *testing.T) {
+	var foreign atomic.Bool
+	up := foreignUp(t, &foreign)
+	other := foreignUp(t, &foreign)
+	s := prevSandbox(t, provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}, Responses: up.srv.URL + "/v1"})
+	if err := provider.Save(provider.Provider{ID: "other", Name: "Other", Key: "k2", Models: []string{"m1"}, Responses: other.srv.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	id := responseID(t, askResponses(t, s, "", `{"model":"fake/m1","input":"first turn"}`))
+	id = responseID(t, askResponses(t, s, "", `{"model":"fake/m1","previous_response_id":"`+id+`","input":"again"}`))
+	if in, _ := json.Marshal(up.last()["input"]); !strings.Contains(string(in), `"id":"msg_1"`) {
+		t.Fatalf("the provider that made them not sent its own ids: %.400s", in)
+	}
+	responseID(t, askResponses(t, s, "", `{"model":"other/m1","previous_response_id":"`+id+`","input":"second turn"}`))
+	if n := other.calls(); n != 1 {
+		t.Fatalf("%d calls to the other provider, want one", n)
+	}
+	wholeWithoutIDs(t, other.last())
+}

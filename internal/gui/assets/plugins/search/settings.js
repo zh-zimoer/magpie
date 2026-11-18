@@ -14,6 +14,8 @@ let searchDraft = { vendor: "tavily", key: "", url: "", err: "" };
 function renderSearch(s, keep) {
   const box = $("#searchList");
   box.replaceChildren();
+  const off = s.builtins?.find((f) => f.id === "search")?.on === false;
+  featOff(box, s, "search", t("magpie searches for no model until it is on. Adding a search API or naming a provider below turns it on"));
   renderSearcher(s, keep, box);
   // rows go into the box, or into a search API's own unit (its row and its
   // keys' row), which is dragged as one (#2286)
@@ -95,7 +97,8 @@ function renderSearch(s, keep) {
   // the ones a search asks: one switched off is kept, never asked (#2286)
   const asked = (s.searchAPIs || []).filter((a) => !a.off);
   const apiFirst = s.searchFirst === "api" && asked.length > 0;
-  const by = s.searcher === "off" ? t("Provider search is off; only these APIs are used")
+  const by = off ? t("Off in Plugins › Built-in")
+    : s.searcher === "off" ? t("Provider search is off; only these APIs are used")
     : !s.searchProvider ? t("No provider can search, so these are asked")
     : apiFirst ? t("Asked before {who}, which searches when these fail", { who: s.searchProvider })
     : t("Now done by {who}; these come after it", { who: s.searchProvider });
@@ -183,7 +186,7 @@ function renderSearch(s, keep) {
   // Discord), for an agent to mount as its web_search and web_fetch tools
   const mcpURL = mcpAddress(s, "/mcp/magpie/web-search");
   const mcp = row(t("MCP server"), t("Cursor, Claude Desktop and other agents can add this search as an MCP server (Streamable HTTP), with a web_search tool and a web_fetch tool that reads a page by its URL. From another computer, send a gateway key as Authorization: Bearer <key>."),
-    el("code", "", mcpURL), copyBtn(mcpURL, t("Address")));
+    ...mcpWhere(s, renderSettings), el("code", "", mcpURL), copyBtn(mcpURL, t("Address")));
   mcp.id = "searchMcpRow";
   // The Library gives this search to the agents picked for it, as Magpie
   // Web Search, and lists it under its MCP servers: an address alone had
@@ -192,7 +195,43 @@ function renderSearch(s, keep) {
   // where the reader is: gateway mode has no Library, and the Library can
   // be turned off
   mcp.querySelector(".who").append(...libWay("magpie-web-search", t("Give agents Magpie Web Search…"), "search-mcp-lib"));
+  searchMore(asked, set);
 }
+
+// Web search's Advanced: the search APIs asked in order, or all at once
+// with their results merged and repeats left out (#2845's mix, heyiwei5
+// on X). Seldom changed, so folded, and open while some are mixed; with
+// fewer than two on there is nothing to mix. A mix of some of them, made
+// with magpie search mix, has neither choice on, and the line names them.
+function searchMore(asked, set) {
+  const more = $("#searchMore"), list = $("#searchMoreList");
+  list.replaceChildren();
+  more.hidden = asked.length < 2;
+  if (more.hidden) return;
+  const mixed = asked.filter((a) => a.mix);
+  const cur = mixed.length < 2 ? "order" : mixed.length === asked.length ? "all" : "";
+  const r = el("div", "row pref");
+  r.id = "searchMixRow";
+  const who = el("div", "who"), val = el("div", "val");
+  who.append(el("div", "name", t("Ask the search APIs")),
+    el("div", "sub", cur ? t("In order, the next only when one fails or finds nothing; or all at once, their results merged without repeats")
+      : t("Asked together now: {names}", { names: mixed.map((a) => a.name).join(", ") })));
+  val.append(segs([["order", t("In order")], ["all", t("All at once")]], cur,
+    (v) => set({ mix: v === "all" ? asked.map((a) => a.vendor) : [] })));
+  r.append(who, val);
+  list.append(r);
+  if (mixed.length > 1) more.open = true;
+}
+
+// Plugins › Built-in › Web search's own line (featGo): what a model that
+// can't search is searched with now, in place of how many are set up, or
+// that nothing is yet (netube99 on X)
+featWho.search = (line, f, who) => {
+  if (!f.on) return;
+  if (f.searches?.length) who.querySelector(".feat-why")?.remove();
+  line.append(f.searches?.length ? t("Searches with {names}", { names: f.searches.join(" → ") })
+    : el("span", "warn", t("Nothing to search with yet")));
+};
 
 // searchArrange: the search APIs are asked in the order they are listed,
 // and put in another by dragging one anywhere off its buttons, or with

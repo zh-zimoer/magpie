@@ -15,8 +15,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // The test binary is also the shim (MAGPIE_TUI_TEST=shim) and a fake
@@ -26,6 +28,10 @@ import (
 func TestMain(m *testing.M) {
 	switch os.Getenv("MAGPIE_TUI_TEST") {
 	case "shim":
+		// FAKE_IMAGE_PAD: imagePad, as another system's
+		if pad := os.Getenv("FAKE_IMAGE_PAD"); pad != "" {
+			imagePad, _ = strconv.Atoi(pad)
+		}
 		if err := Run(os.Args[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -230,6 +236,24 @@ func fakeChrome(r *bufio.Reader, how string) {
 // image file before it takes them in: one that ends naming one.
 var namesImage = regexp.MustCompile(`(?im)\.(png|jpe?g|gif|webp)[ \t]*$`)
 
+// fakeImage is an image the fake took in, as its prompt holds it.
+var fakeImage = regexp.MustCompile(`\[Image #(\d+):([^\]]*)\]`)
+
+// fakeUserRow is a message's content as Claude Code's transcript records
+// it: its words, each image's mark "[Image #<n>]" and, with images, the
+// images as blocks after them (whole.go reads it so).
+func fakeUserRow(typed string) any {
+	m := fakeImage.FindAllStringSubmatch(typed, -1)
+	if len(m) == 0 {
+		return typed
+	}
+	content := []any{map[string]any{"type": "text", "text": fakeImage.ReplaceAllString(typed, "[Image #$1]")}}
+	for _, img := range m {
+		content = append(content, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": base64.StdEncoding.EncodeToString([]byte(img[2]))}})
+	}
+	return content
+}
+
 // nameWait is how long the fake takes words that name an image file to
 // take in. Claude Code took 0.45s, asking the clipboard for the file; the
 // fake's is longer than its image's 200ms and the Enter after it, for an
@@ -243,6 +267,11 @@ func fakeClaude(args []string) {
 			fmt.Printf(`{"type":"result","subtype":"success","is_error":false,"result":"print mode"}` + "\n")
 		}
 		return
+	}
+	// FAKE_SLOW_START: nothing drawn for that long, as a loaded machine
+	// brings up the helper and Claude Code (#5079)
+	if d, err := time.ParseDuration(os.Getenv("FAKE_SLOW_START")); err == nil {
+		time.Sleep(d)
 	}
 	if os.Getenv("FAKE_FAIL") == "1" {
 		fmt.Print("something went wrong\n")
@@ -341,12 +370,42 @@ func fakeClaude(args []string) {
 	takeText := func(p string) {
 		mu.Lock()
 		defer mu.Unlock()
+		// FAKE_CUT: a paste over 1024 bytes loses its whole blocks, as
+		// Windows 10's own ConPTY lost them (#5205): the tail is left
+		if os.Getenv("FAKE_CUT") == "1" && len(p) > 1024 {
+			p = p[len(p)/1024*1024:]
+		}
 		draw := p
 		if breaks := strings.Count(p, "\n"); len(p) > 800 || breaks > 2 {
 			pasted++
 			draw = fmt.Sprintf("[Pasted text #%d +%d lines]", pasted, breaks)
 		}
 		take(p, draw)
+	}
+	// pasteEnded takes in a paste that has ended
+	pasteEnded := func(p string) {
+		mu.Lock()
+		taking = true
+		fmt.Print("\r❯ " + drawn.String())
+		mu.Unlock()
+		// FAKE_NO_IMAGE: an image's path pasted stays words, as a
+		// console whose pastes Claude Code can't tell from typing
+		// leaves it (ok123now on X, Windows 10 LTSC 21H2)
+		if b, err := os.ReadFile(strings.TrimSpace(p)); err == nil && strings.HasPrefix(filepath.Base(strings.TrimSpace(p)), "image-") && os.Getenv("FAKE_NO_IMAGE") != "1" {
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				mu.Lock()
+				defer mu.Unlock()
+				pasted++
+				take(fmt.Sprintf("[Image #%d:%s]", pasted, b), fmt.Sprintf("[Image #%d]", pasted))
+			}()
+			return
+		}
+		if namesImage.MatchString(p) {
+			time.AfterFunc(nameWait, func() { takeText(p) })
+			return
+		}
+		takeText(p)
 	}
 	// retry is what an "r" draws while /usage's panel says it couldn't
 	// load the figures, nil when it says nothing of the kind
@@ -362,34 +421,27 @@ func fakeClaude(args []string) {
 			if _, err := io.ReadFull(r, seq); err != nil {
 				return
 			}
+			// FAKE_DROP_MARKS: the console drops the bracketed-paste
+			// marks, as ok123now's Windows 10 LTSC 21H2 is thought to
+			if os.Getenv("FAKE_DROP_MARKS") == "1" {
+				continue
+			}
 			pasting = string(seq) == "[200~"
 			if pasting {
 				paste.Reset()
 				continue
 			}
-			p := paste.String()
-			mu.Lock()
-			taking = true
-			fmt.Print("\r❯ " + drawn.String())
-			mu.Unlock()
-			if b, err := os.ReadFile(p); err == nil && strings.HasPrefix(filepath.Base(p), "image-") {
-				go func() {
-					time.Sleep(200 * time.Millisecond)
-					mu.Lock()
-					defer mu.Unlock()
-					pasted++
-					take(fmt.Sprintf("[Image #%d:%s]", pasted, b), fmt.Sprintf("[Image #%d]", pasted))
-				}()
-				continue
-			}
-			if namesImage.MatchString(p) {
-				time.AfterFunc(nameWait, func() { takeText(p) })
-				continue
-			}
-			takeText(p)
+			pasteEnded(paste.String())
 			continue
 		case pasting:
 			paste.WriteByte(c)
+			continue
+		case c != '\r' && c != 0x1b && r.Buffered() >= 800:
+			// a read of over 800 characters is a paste, marked or not, as
+			// Claude Code takes one
+			b := make([]byte, r.Buffered())
+			_, _ = io.ReadFull(r, b)
+			pasteEnded(string(c) + string(b))
 			continue
 		case c == 'r' && retry != nil:
 			fakeFrames(retry)
@@ -409,6 +461,7 @@ func fakeClaude(args []string) {
 			continue
 		}
 		line := typed.String()
+		asTyped := line // what the transcript records, as Claude Code does (fakeUserRow)
 		typed.Reset()
 		drawn.Reset()
 		mu.Unlock()
@@ -461,6 +514,16 @@ func fakeClaude(args []string) {
 				switch os.Getenv("FAKE_USAGE_THEN") {
 				case "slow":
 					time.Sleep(4 * time.Second)
+				case "stalled":
+					// the figures 4s later, their redraw stalled a
+					// moment after the screen is cleared, as a busy
+					// machine can (#6376)
+					time.Sleep(4 * time.Second)
+					if clear := []byte("\x1b[2J\x1b[H"); bytes.HasPrefix(b, clear) {
+						_, _ = os.Stdout.Write(clear)
+						b = b[len(clear):]
+					}
+					time.Sleep(2 * time.Second)
 				case "retry":
 					retry = b
 					continue
@@ -474,7 +537,7 @@ func fakeClaude(args []string) {
 		}
 		f, _ := os.OpenFile(filepath.Join(dir, sid+".jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		rows := []any{
-			map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": line}},
+			map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": fakeUserRow(asTyped)}},
 			map[string]any{"type": "assistant", "requestId": "req_1", "message": map[string]any{"id": "msg_1", "model": "claude-haiku", "role": "assistant",
 				"content": []any{map[string]any{"type": "text", "text": "echo: " + line}}}},
 			map[string]any{"type": "system", "subtype": "turn_duration"},
@@ -668,6 +731,86 @@ func TestShimPastesImages(t *testing.T) {
 	left, _ := filepath.Glob(filepath.Join(filepath.Dir(os.Getenv("MAGPIE_TUI_TEST_CFG")), "tmp", imagesPrefix+"*"))
 	if len(left) > 0 {
 		t.Fatalf("the images are left after their message: %v", left)
+	}
+}
+
+// An image whose path Claude Code leaves as words ends the turn in an
+// error that begins Unpastable, which the bridge asks again as claude -p
+// (ok123now on X): it was an exit with no result, a 502 the client asked
+// again and again. The helper ends with it, the prompt holding the path.
+func TestShimImageNotTakenIsUnpastable(t *testing.T) {
+	img := `[{"type":"text","text":"what colour?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` +
+		base64.StdEncoding.EncodeToString([]byte("red")) + `"}}]`
+	out := runShim(t, []string{"FAKE_NO_IMAGE=1"}, append([]string{fakePath(t)}, pArgs...), []string{img}, 2)
+	if out[1]["type"] != "result" || out[1]["is_error"] != true || !strings.HasPrefix(fmt.Sprint(out[1]["result"]), Unpastable+ImageNotTaken) {
+		t.Fatalf("the turn ended %v, want an error beginning %q", out[1], Unpastable+ImageNotTaken)
+	}
+}
+
+// A message that reaches Claude Code cut, as Windows 10's own ConPTY cut
+// one over 1KB (#5205), ends the turn in an error that begins Unpastable
+// before any of its reply, which the bridge asks again as claude -p: it
+// was answered as sent, the model given the cut's tail. A short one on the
+// same console is answered as before.
+func TestShimCutMessageIsUnpastable(t *testing.T) {
+	long := "K-HEAD " + strings.Repeat("filler words ", 400) + " K-TAIL"
+	out := runShim(t, []string{"FAKE_CUT=1"}, append([]string{fakePath(t)}, pArgs...), []string{long}, 2)
+	if r := out[1]; r["type"] != "result" || r["is_error"] != true || !strings.HasPrefix(fmt.Sprint(r["result"]), Unpastable) ||
+		!strings.Contains(fmt.Sprint(r["result"]), "characters") {
+		t.Fatalf("a cut message ended %v, want an error beginning %q", out, Unpastable)
+	}
+	for _, m := range out {
+		if m["type"] == "assistant" || m["type"] == "stream_event" {
+			t.Fatalf("a cut message's reply got out: %v", out)
+		}
+	}
+	short := runShim(t, []string{"FAKE_CUT=1"}, append([]string{fakePath(t)}, pArgs...), []string{"hello"}, 3)
+	if r := short[2]; r["type"] != "result" || r["is_error"] != false {
+		t.Fatalf("a short message ended %v, want answered", short)
+	}
+}
+
+// An image's path sent padded, with no bracketed-paste marks, is taken as
+// the image on a console that drops the marks, as Claude Code takes a read
+// of over 800 characters as a paste; bracketed, it stays words there
+// (ok123now on X, Windows 10 LTSC 21H2). Windows sends it padded.
+func TestShimPaddedImageTakenWithoutMarks(t *testing.T) {
+	img := `[{"type":"text","text":"what colour?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` +
+		base64.StdEncoding.EncodeToString([]byte("red")) + `"}}]`
+	out := runShim(t, []string{"FAKE_DROP_MARKS=1", "FAKE_IMAGE_PAD=900"}, append([]string{fakePath(t)}, pArgs...), []string{img}, 3)
+	var said string
+	for _, m := range out[1:] {
+		if m["type"] == "assistant" {
+			b, _ := json.Marshal(m["message"])
+			said = string(b)
+		}
+	}
+	if !strings.Contains(said, `[Image #1:red]`) || strings.Contains(said, imagesPrefix) {
+		t.Fatalf("Claude Code was sent %s, want the image taken: %v", said, out)
+	}
+	bracketed := runShim(t, []string{"FAKE_DROP_MARKS=1", "FAKE_IMAGE_PAD=0"}, append([]string{fakePath(t)}, pArgs...), []string{img}, 2)
+	if r := bracketed[1]; r["type"] != "result" || r["is_error"] != true || !strings.HasPrefix(fmt.Sprint(r["result"]), Unpastable+ImageNotTaken) {
+		t.Fatalf("a bracketed path on a console that drops the marks ended %v, want %q", r, Unpastable+ImageNotTaken)
+	}
+}
+
+// Windows' padded path is one read of over 800 characters, which Claude
+// Code takes as a paste, and under the 1024-byte blocks Windows 10's
+// conhost loses of a longer write (#5205), for a short path, a long one and
+// one with a user name in Chinese.
+func TestImagePasteWindowsLength(t *testing.T) {
+	for _, path := range []string{
+		`C:\x\image-1.png`,
+		`C:\Users\administrator\AppData\Local\Temp\magpie-claude-images-123456-987654321\image-12.png`,
+		`C:\Users\张三丰\AppData\Local\Temp\magpie-claude-images-123456-987654321\image-1.png`,
+	} {
+		w := imagePaste(path, 900)
+		if n := utf8.RuneCountInString(w); n <= 800 || len(w) >= 1024 || strings.TrimRight(w, " ") != path || strings.Contains(w, "\x1b") {
+			t.Errorf("%s padded to %d characters, %d bytes: %q", path, n, len(w), w)
+		}
+	}
+	if w := imagePaste(`C:\x\image-1.png`, 0); w != "\x1b[200~C:\\x\\image-1.png\x1b[201~" {
+		t.Errorf("unpadded = %q, want the path bracketed", w)
 	}
 }
 
@@ -957,22 +1100,44 @@ func TestShimEndsAtItsCallersDeadline(t *testing.T) {
 		{"no /usage panel", `{"type":"command","command":"/usage"}`, "hadn't drawn /usage's panel in the", "", []string{"FAKE_USAGE=" + filepath.Join(t.TempDir(), "none")}},
 		// the banner drawn again and no panel after it: never told as one
 		{"banner, no /usage panel", `{"type":"command","command":"/usage"}`, "hadn't drawn /usage's panel in the", "magpie-claude-work-501", []string{"FAKE_USAGE_BANNER=never"}},
+		// Claude Code up only after the first deadline, as on a loaded
+		// machine: run again with more time, never failed for it
+		{"trust unanswered, slow to start", `{"type":"user","message":{"role":"user","content":"hello"}}`, "asked whether to trust " + wd + ", not answered in the", "trust this folder", []string{"FAKE_TRUST=deaf", TrustEnv + "=1", "FAKE_SLOW_START=3500ms"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			start := time.Now()
-			by := start.Add(3 * time.Second).UnixMilli()
-			out, stderr, err := runEndsTold(t, t.TempDir(), append(c.env, DeadlineEnv+"="+strconv.FormatInt(by, 10)), c.line)
-			d := time.Since(start)
-			if err == nil || strings.Contains(out, `"type":"result"`) {
-				t.Fatalf("ended %v, wrote %q", err, out)
-			}
-			if !strings.Contains(stderr, "claude-tui: Claude Code "+c.why) || !strings.Contains(stderr, c.screen) {
-				t.Fatalf("stderr %q", stderr)
-			}
-			// at the deadline, with room for a slow machine to start it,
-			// and well before the helper's own waits (20s, 45s)
-			if d < 2500*time.Millisecond || d > 15*time.Second {
-				t.Fatalf("ended after %s, the deadline 3s", d)
+			// The deadline counts from before the helper and Claude Code
+			// start, and a loaded machine can take longer than it to bring
+			// them up: "showed no prompt in the 2.8s" at load 13-20, and
+			// in other full runs (#5079). A run that ended at it with no
+			// prompt shown, before Claude Code drew what the case is about,
+			// says nothing of the case, and runs again with twice the time;
+			// so does one that ended after the prompt but before the case's
+			// screen was drawn (the banner case, "❯ /usage" alone).
+			// One whose screen has it is told as it is: the helper misread it.
+			for wait := 3 * time.Second; ; wait *= 2 {
+				start := time.Now()
+				by := start.Add(wait).UnixMilli()
+				out, stderr, err := runEndsTold(t, t.TempDir(), append(c.env, DeadlineEnv+"="+strconv.FormatInt(by, 10)), c.line)
+				d := time.Since(start)
+				if err == nil || strings.Contains(out, `"type":"result"`) {
+					t.Fatalf("ended %v, wrote %q", err, out)
+				}
+				notUp := c.screen == "" && strings.Contains(stderr, "claude-tui: Claude Code showed no prompt in the ") ||
+					c.screen != "" && !strings.Contains(stderr, c.screen)
+				if notUp && wait < 12*time.Second {
+					t.Logf("not up in %s, again with %s: %q", wait, 2*wait, stderr)
+					continue
+				}
+				if !strings.Contains(stderr, "claude-tui: Claude Code "+c.why) || !strings.Contains(stderr, c.screen) {
+					t.Fatalf("stderr %q", stderr)
+				}
+				// at the deadline, with room for a slow machine to end it;
+				// the helper's own waits (20s, 45s) say "in 20s", never "in
+				// the …s its caller waits for it" (c.why)
+				if d < wait-500*time.Millisecond || d > wait+12*time.Second {
+					t.Fatalf("ended after %s, the deadline %s", d, wait)
+				}
+				return
 			}
 		})
 	}
@@ -1370,6 +1535,16 @@ func TestShimWaitsPastSavedUsage(t *testing.T) {
 			t.Fatalf("told %v", r)
 		}
 	})
+	// the refreshed panel's redraw stalls after the clear: the saved
+	// figures drawn before it are not told (#6376)
+	t.Run("refreshed after a stall", func(t *testing.T) {
+		out := runShim(t, []string{"FAKE_USAGE=" + fresh, "FAKE_USAGE_FIRST=" + refreshing, "FAKE_USAGE_THEN=stalled"},
+			append([]string{fakePath(t)}, pArgs...), []string{`raw:{"type":"command","command":"/usage"}`}, 2)
+		want := "Current session: 0% used · resets 12am (Asia/Shanghai)\nCurrent week (all models): 81% used · resets Nov 4 at 6am (Asia/Shanghai)"
+		if r := out[1]; r["type"] != "result" || r["is_error"] != false || r["result"] != want {
+			t.Fatalf("told %v", r)
+		}
+	})
 	t.Run("last known", func(t *testing.T) {
 		out := runShim(t, []string{"FAKE_USAGE=" + lastKnown},
 			append([]string{fakePath(t)}, pArgs...), []string{`raw:{"type":"command","command":"/usage"}`}, 2)
@@ -1458,5 +1633,42 @@ func TestShimEndedAfterLastWordsRead(t *testing.T) {
 				t.Fatalf("the exit was recorded with the screen %q", got)
 			}
 		})
+	}
+}
+
+// eagainOnce answers EAGAIN before its bytes, as a non-blocking terminal
+// with nothing written yet does.
+type eagainOnce struct {
+	again int
+	data  []byte
+}
+
+func (e *eagainOnce) Read(p []byte) (int, error) {
+	if e.again > 0 {
+		e.again--
+		return 0, syscall.EAGAIN
+	}
+	if len(e.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, e.data)
+	e.data = e.data[n:]
+	return n, nil
+}
+
+func (e *eagainOnce) Write(p []byte) (int, error) { return len(p), nil }
+
+// TestReadPastEAGAIN: EAGAIN is not the terminal's end; read keeps
+// reading what Claude Code draws after it (#4834).
+func TestReadPastEAGAIN(t *testing.T) {
+	s := &shim{pty: &eagainOnce{again: 3, data: []byte("Welcome")}, changed: make(chan struct{}, 1), readDone: make(chan struct{})}
+	go s.read()
+	select {
+	case <-s.readDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("read never ended")
+	}
+	if got := string(s.screen); got != "Welcome" {
+		t.Fatalf("screen %q, want what was drawn after the EAGAIN", got)
 	}
 }

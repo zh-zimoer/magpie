@@ -705,18 +705,23 @@ func contextOfRecsFor(routes []ctxRec, days int, only string) ctxJSON {
 			}
 		}
 	}
-	// every other agent's sessions go by the name the Sessions page shows
-	untitled := map[string]int{}
+	// every other agent's sessions go by the name the Sessions page shows,
+	// asked for by the key a request names the session by: a ZCode request
+	// names it without the sess_ prefix its database gives, and a subagent's
+	// own session is no row of its own, which Titles answers for both
+	// (flandern1211_58540 on Discord: the page showed the id)
+	untitled := make([]string, 0, len(out.Sessions))
+	at := make(map[string]int, len(out.Sessions))
 	for i, s := range out.Sessions {
 		if s.Title == "" {
-			untitled[s.Agent+"\x00"+s.Key] = i
+			k := s.Agent + ":" + s.Key
+			untitled = append(untitled, k)
+			at[k] = i
 		}
 	}
-	if len(untitled) > 0 {
-		for _, s := range list() {
-			if i, ok := untitled[s.Agent+"\x00"+s.ID]; ok && s.Title != "" {
-				out.Sessions[i].Title = s.Title
-			}
+	for k, name := range sessions.Titles(untitled) {
+		if i, ok := at[k]; ok {
+			out.Sessions[i].Title = name
 		}
 	}
 	for _, acc := range agents {
@@ -881,7 +886,9 @@ var readingDay func(day string)
 func dayStamp(day string) string {
 	var b strings.Builder
 	base := filepath.Join(gateway.HistoryDir(), day+".jsonl")
-	for _, p := range []string{base, base + ".gz"} {
+	// the day's numbered files (day.1.jsonl, past a size) are part of it
+	numbered, _ := filepath.Glob(filepath.Join(gateway.HistoryDir(), day+".*.jsonl*"))
+	for _, p := range append([]string{base, base + ".gz"}, numbered...) {
 		if fi, err := os.Stat(p); err == nil {
 			fmt.Fprintf(&b, "%d/%d;", fi.Size(), fi.ModTime().UnixNano())
 		} else {

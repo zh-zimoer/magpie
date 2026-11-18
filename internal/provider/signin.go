@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/netproxy"
+	"github.com/yetone/magpie/internal/redact"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -648,6 +649,10 @@ func (s *signInFlow) finish(out SignInState) bool {
 		s.mu.Lock()
 	}
 	out.ID, out.Agent, out.URL, out.Code, out.Proxy = s.st.ID, s.st.Agent, s.st.URL, s.st.Code, s.st.Proxy
+	// a sign-in's failure is shown, logged and pasted into reports: a
+	// token a vendor's (or a plugin's) error quoted goes out of it here,
+	// where every sign-in ends (QuotedReply)
+	out.Error = redact.Scrub(out.Error)
 	s.st = out
 	stop, srv := s.stop, s.srv
 	s.mu.Unlock()
@@ -833,7 +838,7 @@ func claudeLogin(c claudeCredentials, acct map[string]any) (savedLogin, error) {
 		return savedLogin{}, err
 	}
 	profile, _ := json.Marshal(acct)
-	return savedLogin{Agent: "claude", User: claudeUser(email, c.OAuth.SubscriptionType, acct), Plan: c.OAuth.plan(), Auth: auth, Profile: profile}, nil
+	return savedLogin{Agent: "claude", User: claudeUser(email, c.OAuth.SubscriptionType, acct), Plan: claudeLivePlan(c, "", acct), Auth: auth, Profile: profile}, nil
 }
 
 func codexExchange(ctx context.Context, code, verifier, redirect string) (savedLogin, error) {
@@ -913,6 +918,14 @@ func addLogin(l savedLogin) (using bool, err error) {
 		// account is magpie's alone, its own sign-in left as it is
 		using = false
 	}
+	if l.AccessOnly {
+		// kept access token only: Codex would renew it, so it is magpie's
+		// alone, and never the one Codex holds here or in another folder
+		if signedIn && (sameLogin(live, l) || sameRefresh(live.Auth, l.Auth)) || codexHeldFolder(ls, l) != "" {
+			return false, errAccessOnlyHeld
+		}
+		using = false
+	}
 	if first := claudeStandIn(ls); !signedIn && l.Agent == "claude" && first != "" {
 		// logged out of Claude Code with accounts in magpie: it stays so,
 		// as the user left it (a claude.ai sign-in beside magpie's token
@@ -935,7 +948,7 @@ func addLogin(l savedLogin) (using bool, err error) {
 	// Codex and magpie both read it, or the next look would read the old
 	// ones back over them
 	held := ""
-	if l.Agent == "codex" && !using {
+	if l.Agent == "codex" && !using && !l.AccessOnly {
 		held = codexHeldFolder(ls, l)
 		l.Home = held
 	}
@@ -1010,8 +1023,9 @@ func signInPage(w http.ResponseWriter, ok bool, title, msg string) {
 		mark = `<path d="M7 7l10 10M17 7L7 17"/>`
 	}
 	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>magpie · %[1]s</title><style>
-:root{--bg:#fafafa;--fg:#111;--muted:#6b6b6b;--line:#e4e4e4;--card:#fff}
+:root{--bg:#fafafa;--fg:#111;--muted:#6b6b6b;--line:#e4e4e4;--card:#fff;color-scheme:light dark}
 @media (prefers-color-scheme:dark){:root{--bg:#0e0e0e;--fg:#f2f2f2;--muted:#9a9a9a;--line:#262626;--card:#161616}}
 *{box-sizing:border-box}html,body{height:100%%;margin:0}
 body{background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;display:grid;place-items:center;padding:16px}

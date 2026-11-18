@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -37,6 +36,7 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/claudecode"
 	"github.com/yetone/magpie/internal/filelock"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/settings"
@@ -229,15 +229,21 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	// own header, below, still has the last word
 	OpenCodeSession(req.Header, req.URL.String())
 	if p.IsVertex() {
-		// a Google token, which goes nowhere but the project's own address
+		// a Google token, which goes nowhere but the project's own address (a key,
+		// nowhere but where the provider is asked)
 		if base := p.vertexBase(); base == "" || !strings.HasPrefix(req.URL.String(), base+"/") {
 			return fmt.Errorf("%s is asked only at Vertex AI, at its project's address", p.Name)
 		}
-		tok, err := p.vertexAccessToken(ctx)
-		if err != nil {
-			return err
+		if p.Key != "" {
+			// an API key (express mode), in the header Google's docs name
+			req.Header.Set("x-goog-api-key", p.Key)
+		} else {
+			tok, err := p.vertexAccessToken(ctx)
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Authorization", "Bearer "+tok)
 		}
-		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	for k, v := range AuthHeaders(p, proto) {
 		req.Header.Set(k, v)
@@ -363,7 +369,14 @@ type Exclusion struct {
 // signed in here (a magpie serve under another HOME, say).
 func Excluded() []Exclusion {
 	var out []Exclusion
+	forgot := map[string]bool{}
+	for _, p := range storedFile().Providers {
+		forgot[p.ID] = p.Forgot
+	}
 	for _, a := range Hidden() {
+		if forgot[a.ID] {
+			continue
+		}
 		x := Exclusion{Agent: a.Account.Agent, Provider: a.ID, Why: "You removed it from magpie.", Quiet: a.Quiet, Tucked: a.Tucked}
 		if a.IsPlugin() {
 			x.Name = a.Name
@@ -425,11 +438,44 @@ type claudeAuth struct {
 // and tells the two apart only by the rate-limit tier.
 func (a claudeAuth) plan() string { return claudePlan(a.SubscriptionType, a.RateLimitTier) }
 
-func claudePlan(sub, tier string) string {
-	if sub == "max" && strings.Contains(tier, "max_20x") {
+func claudePlan(sub, tier string) string { return claudePlanShown(sub, tier, "") }
+
+// claudePlanShown is claudePlan with the name Claude itself shows the
+// plan by: /api/oauth/profile's organization.plan_display_name, which
+// Claude Code keeps as oauthAccount.planDisplayName and shows as
+// "Claude <name>" ("Ultra" for a Max 20x account, none for Max 5x). A
+// known tier decides; the name is read only when the tier doesn't say,
+// so a profile left from another account can't rename this one.
+func claudePlanShown(sub, tier, shown string) string {
+	if sub != "max" {
+		return sub
+	}
+	switch {
+	case strings.Contains(tier, "max_20x"):
+		return "ultra"
+	case strings.Contains(tier, "max_5x"):
+		return "max"
+	case strings.EqualFold(strings.TrimSpace(shown), "ultra"):
 		return "ultra"
 	}
 	return sub
+}
+
+// claudeShownPlan is the plan name in a Claude Code oauthAccount profile.
+func claudeShownPlan(acct map[string]any) string {
+	s, _ := acct["planDisplayName"].(string)
+	return s
+}
+
+// claudeLivePlan is the plan of Claude Code's own sign-in c: the
+// credentials', or `claude auth status`'s when it said one, named by the
+// tier (claudePlanShown); acct is Claude Code's profile, nil when unread.
+func claudeLivePlan(c claudeCredentials, statusPlan string, acct map[string]any) string {
+	sub := c.OAuth.SubscriptionType
+	if statusPlan != "" {
+		sub = statusPlan
+	}
+	return claudePlanShown(sub, c.OAuth.RateLimitTier, claudeShownPlan(acct))
 }
 
 // claudeCredentials keeps the whole credential blob in raw, so refreshing a
@@ -618,7 +664,7 @@ func claudeKeychainAccount() string {
 	return name
 }
 
-var keychainAccountRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+var keychainAccountRe = lazyre.New(`^[a-zA-Z0-9._-]+$`)
 
 // keychainText undoes `security find-generic-password -w` printing a
 // password with a character it can't print — a newline — as hex.
@@ -823,14 +869,11 @@ func claudeAccount() (Provider, bool) {
 	if signedOut {
 		return claudeStandInAccount()
 	}
-	plan := c.OAuth.plan()
-	if statusPlan != "" {
-		plan = claudePlan(statusPlan, c.OAuth.RateLimitTier)
-	}
 	// named as its saved login is (liveLogin): it is then the account Logins
 	// flags Active, not served a second time beside itself, and its
 	// allowances and limits are found under its name (#177)
 	user, acct := claudeSignedInUser(c.OAuth.SubscriptionType, statusPlan, user)
+	plan := claudeLivePlan(c, statusPlan, acct)
 	if b, err := c.marshal(); err == nil && user != "" {
 		// by its sign-in when its profile is another's (claudeSignInOwner)
 		l := savedLogin{Agent: "claude", User: user, Auth: b}
@@ -879,7 +922,10 @@ func claudeProvider(acct *Account) Provider {
 	// Claude's models are the ones magpie knows and the ones Claude Code
 	// was told an account has (claude_models.go): listing them would ask
 	// Anthropic with the account's sign-in, which magpie never does
-	acct.fetch = func(context.Context) ([]catalog.Model, error) {
+	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
+		// models.dev's list, fetched again first when it is older than
+		// a few minutes: a model launched since the day's sync is listed
+		catalog.Asked(ctx)
 		ms := claudeModels()
 		return ms, catalog.SaveLive("claude", claudeBase, ms)
 	}
@@ -1074,11 +1120,11 @@ func codexAccount(home string) (Provider, bool) {
 	acct.models = catalog.Codex
 	acct.listedOnly = true
 	acct.fetch = func(ctx context.Context) ([]catalog.Model, error) {
-		ms, err := codexModels(ctx, acct.sign)
+		ms, ver, err := codexModelsAsked(ctx, acct.sign)
 		if err != nil {
 			return nil, err
 		}
-		catalog.SaveLive(accountModels("codex", acct.User), CodexBase, ms)
+		catalog.SaveLiveAsked(accountModels("codex", acct.User), CodexBase, ver, ms)
 		codexFetchSaved(ctx)
 		ms = codexPoolModels(ms)
 		return ms, catalog.SaveLive("codex", CodexBase, ms)
@@ -1337,6 +1383,17 @@ var copilotAPIHeaders = func() map[string]string {
 	return h
 }()
 
+// copilotModelsVersion is the API version the editors' sign-in asks
+// /models at: the one Copilot Chat 0.68's @vscode/copilot-api (0.5.2)
+// sends on every Copilot API request it makes, Models among them, over
+// networking.ts's 2026-01-09. At 2026-01-09 Copilot lists a model with a
+// long-context tier at its default tier alone (claude-opus-5.5's
+// max_prompt_tokens 200000); from 2026-06-01 on at its whole window
+// (1000000) with billing.token_prices' default and long_context tiers
+// (gtliuu on X). Chat requests keep copilotAPIHeaders' version: Copilot
+// served a 240K prompt above the default tier at either.
+const copilotModelsVersion = "2026-08-01"
+
 type copilotSession struct {
 	Token     string `json:"token"`
 	ExpiresAt int64  `json:"expires_at"`
@@ -1575,6 +1632,8 @@ func copilotProvider(app copilotApp, plan string) Provider {
 		if err != nil {
 			return nil, err
 		}
+		// with what the other accounts' plans add (copilot_pool.go)
+		ms = copilotPoolModels(ctx, acct.User, ms)
 		return ms, catalog.SaveLive("copilot", copilotBase, ms)
 	}
 	// each model is served on some of these: the newest GPT models on
@@ -1702,7 +1761,7 @@ func copilotAPIs(endpoints []string) []string {
 }
 
 // internal is a Copilot model id nobody picks by hand.
-var copilotInternal = regexp.MustCompile(`^(copilot-search|exec-agent|trajectory)|-(secondary|tertiary|4th|free-auto)$`)
+var copilotInternal = lazyre.New(`^(copilot-search|exec-agent|trajectory)|-(secondary|tertiary|4th|free-auto)$`)
 
 // A model Copilot offers with terms of its own stays disabled until the
 // account accepts them, as VS Code does when one is first picked; magpie
@@ -1775,6 +1834,10 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 	for k, v := range s.headers() {
 		req.Header.Set(k, v)
 	}
+	if !s.direct {
+		// the CLI's own version lists the tiers already
+		req.Header.Set("X-GitHub-Api-Version", copilotModelsVersion)
+	}
 	res, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return nil, err
@@ -1792,13 +1855,17 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 			Fallback  bool     `json:"is_chat_fallback"`
 			Endpoints []string `json:"supported_endpoints"`
 			Billing   *struct {
-				Premium bool `json:"is_premium"`
+				Premium bool               `json:"is_premium"`
+				Prices  copilotTokenPrices `json:"token_prices"`
 			} `json:"billing"`
 			Capabilities struct {
 				Type     string `json:"type"`
 				Supports struct {
 					Efforts []string `json:"reasoning_effort"`
 				} `json:"supports"`
+				Limits struct {
+					Prompt int `json:"max_prompt_tokens"`
+				} `json:"limits"`
 			} `json:"capabilities"`
 			Policy *struct {
 				State string `json:"state"`
@@ -1866,7 +1933,15 @@ func copilotModels(ctx context.Context, app copilotApp) ([]catalog.Model, error)
 		default:
 			continue // not the account's to enable: it answers 403
 		}
-		out = append(out, catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts, APIs: copilotAPIs(m.Endpoints)})
+		mm := catalog.Model{ID: m.ID, Name: m.Name, Efforts: m.Capabilities.Supports.Efforts, APIs: copilotAPIs(m.Endpoints),
+			// the prompt this account's Copilot takes for the model (936K
+			// for gemini-4-carbon), not models.dev's window for the id
+			// (1048576): over it Copilot answers 400 (codealc on X)
+			Context: catalog.Window(m.Capabilities.Limits.Prompt)}
+		if m.Billing != nil {
+			m.Billing.Prices.apply(&mm)
+		}
+		out = append(out, mm)
 	}
 	// Auto, which Copilot's clients offer every account beside the models
 	// it lists, and the only choice a Student plan has: an account whose
@@ -1900,4 +1975,108 @@ func copilotDrawsModel(typ, id string) bool {
 		return false
 	}
 	return catalog.DrawsID(id)
+}
+
+// copilotTier is one tier of a Copilot model's billing.token_prices, from
+// API version 2026-06-01 on: prices in AIUs a batch_size of tokens (one
+// AIU a hundredth of a dollar), up to the tier's prompt. 2026-06-01 names
+// the cache read and the prompt cache_price and context_max, 2026-08-01
+// cache_read_price and max_prompt_tokens.
+type copilotTier struct {
+	Input        float64 `json:"input_price"`
+	Output       float64 `json:"output_price"`
+	CacheRead    float64 `json:"cache_read_price"`
+	Cache        float64 `json:"cache_price"`
+	CacheWrite   float64 `json:"cache_write_price"`
+	CacheWrite1h float64 `json:"cache_write_1h_price"`
+	Prompt       int     `json:"max_prompt_tokens"`
+	ContextMax   int     `json:"context_max"`
+}
+
+func (t copilotTier) prompt() int {
+	if t.Prompt > 0 {
+		return t.Prompt
+	}
+	return t.ContextMax
+}
+
+func (t copilotTier) cacheRead() float64 {
+	if t.CacheRead > 0 {
+		return t.CacheRead
+	}
+	return t.Cache
+}
+
+// samePrice is Copilot Chat's test for a long tier that costs nothing
+// more (languageModelAccess.ts drops such a tier).
+func (t copilotTier) samePrice(o copilotTier) bool {
+	return t.Input == o.Input && t.Output == o.Output && t.cacheRead() == o.cacheRead() &&
+		t.CacheWrite == o.CacheWrite && t.CacheWrite1h == o.CacheWrite1h
+}
+
+type copilotTokenPrices struct {
+	Batch   float64      `json:"batch_size"`
+	Default *copilotTier `json:"default"`
+	Long    *copilotTier `json:"long_context"`
+}
+
+// apply sets m's window and price from its Copilot tiers, the way Copilot
+// Chat picks them: a long tier at the default's prices makes the whole
+// window the one agents are told (claude-opus-5.5's 1M); a long tier
+// that costs more keeps the default tier's prompt as the window and the
+// long one as the most it may be raised to (gpt-6-luna's 272K and 872K),
+// priced by a Tier above the default's prompt. With no tiers listed (an
+// older version's flat prices) m is left as it is.
+func (tp copilotTokenPrices) apply(m *catalog.Model) {
+	d := tp.Default
+	if d == nil {
+		return
+	}
+	long := tp.Long
+	// the whole window is the prompt the model's limits say Copilot
+	// takes, else the long tier's: grok-4.7's long tier says 500000 while
+	// Copilot takes 372000
+	full := m.Context
+	if full == 0 && long != nil {
+		full = catalog.Window(long.prompt())
+	}
+	if long != nil && long.samePrice(*d) {
+		m.Context = full
+		long = nil
+	}
+	if long != nil {
+		if w := catalog.Window(d.prompt()); w > 0 && w < full {
+			m.Context, m.MaxContext = w, full
+		}
+	}
+	if d.Input == 0 && d.Output == 0 {
+		// gpt-4.1's all-zero list, batch_size 0: no price, not a free one
+		return
+	}
+	batch := tp.Batch
+	if batch <= 0 {
+		batch = 1e6
+	}
+	usd := func(aiu float64) float64 { return aiu * (1e6 / batch) / 100 }
+	p := &catalog.Price{Input: usd(d.Input), Output: usd(d.Output), CacheRead: usd(d.cacheRead()),
+		CacheWrite: usd(d.CacheWrite), CacheWrite1h: usd(d.CacheWrite1h)}
+	if long != nil && m.MaxContext > 0 {
+		p.Tiers = []catalog.Tier{{Above: m.Context, Input: usd(long.Input), Output: usd(long.Output),
+			CacheRead: usd(long.cacheRead()), CacheWrite: usd(long.CacheWrite), CacheWrite1h: usd(long.CacheWrite1h)}}
+	}
+	m.Price = p
+}
+
+// copilotListPrice is what Copilot's own /models listed the model at for
+// this account (billing.token_prices), with its long-context tier.
+func (p Provider) copilotListPrice(model string) (catalog.Price, bool) {
+	if p.ID != "copilot" {
+		return catalog.Price{}, false
+	}
+	for _, m := range p.liveByID(model) {
+		if m.Price != nil {
+			return *m.Price, true
+		}
+	}
+	return catalog.Price{}, false
 }

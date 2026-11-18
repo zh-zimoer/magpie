@@ -42,12 +42,12 @@ func toolsAre(t *testing.T, n int) {
 	t.Cleanup(func() { toolsOn = was })
 }
 
-// With nothing set up, none of magpie's own servers is listed, and the
-// list is empty, not null.
+// With nothing set up, only memory and sessions, which need no model,
+// are listed.
 func TestOwnMCPNoneWhenNothingIsOn(t *testing.T) {
 	fresh(t)
 	toolsAre(t, 0)
-	if got := ownMCPNames(t, New()); len(got) != 0 {
+	if got := ownMCPNames(t, New()); len(got) != 2 || got[memoryServerName] != MemoryMCPPath || got[sessionsServerName] != SessionsMCPPath {
 		t.Fatalf("listed %v", got)
 	}
 }

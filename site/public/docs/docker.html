@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Docker · magpie docs</title>
+<title>Run magpie in Docker: an AI gateway on a server or NAS · magpie</title>
 <meta name="description" content="Run magpie in Docker on a server or a NAS: the ghcr.io/yetone/magpie image, its ports, volume and environment, the browser UI, signing in to subscriptions, sharing the gateway with gateway keys, and a Compose file.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -39,6 +39,54 @@
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/docker">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "magpie in Docker",
+   "description": "Run magpie in Docker on a server or a NAS: the ghcr.io/yetone/magpie image, its ports, volume and environment, the browser UI, signing in to subscriptions, sharing the gateway with gateway keys, and a Compose file.",
+   "inLanguage": "en",
+   "url": "https://usemagpie.ai/docs/docker",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "Docs",
+     "item": "https://usemagpie.ai/docs/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "magpie in Docker",
+     "item": "https://usemagpie.ai/docs/docker"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -87,6 +135,7 @@
     <a href="#run">Run it</a>
     <a href="#web">The browser UI</a>
     <a href="#signin">Sign in to subscriptions</a>
+    <a href="#mcp">MCP servers</a>
     <a href="#browser">Your own browser</a>
     <a href="#volume">What is kept</a>
     <a href="#env">Environment</a>
@@ -102,7 +151,7 @@
 
     <div class="table-wrap"><table>
       <tr><td><b>Image</b></td><td><code>ghcr.io/yetone/magpie</code>, for <code>linux/amd64</code> and <code>linux/arm64</code></td></tr>
-      <tr><td><b>Tags</b></td><td><code>latest</code> (the newest release), <code>daily</code> (the newest release as of 20:00 UTC, moved once a day), <code>stable</code> (the desktop app's Stable channel: a release a week, out three days first, or an urgent one at once), <code>0.1.1150</code> (one release), <code>0.1</code>, <code>edge</code> (every change on <code>main</code>)</td></tr>
+      <tr><td><b>Tags</b></td><td><code>latest</code> (the newest release), <code>daily</code> (the desktop app's Daily channel: once a day at 20:00 UTC, the newest release whose CI run passed, or an urgent one at once), <code>stable</code> (the desktop app's Stable channel: a release a week, out three days first, or an urgent one at once), <code>0.1.1150</code> (one release), <code>0.1</code>, <code>edge</code> (every change on <code>main</code>)</td></tr>
       <tr><td><b>Ports</b></td><td><code>3425</code> the gateway agents call; <code>3430</code> the browser UI, when the container runs <code>magpie web</code>; it answers the gateway’s <code>/v1</code> routes too, so a reverse proxy needs only this port</td></tr>
       <tr><td><b>Volume</b></td><td><code>/config</code>: providers, keys, sign-ins, plugins and usage</td></tr>
       <tr><td><b>User</b></td><td>nonroot (uid 65532)</td></tr>
@@ -158,6 +207,10 @@ docker logs magpie</pre>
     </div>
     <p>A Grok (SuperGrok) subscription signs in through xAI’s Grok Build CLI, which the image doesn’t have either. Its sign-in, in the browser UI or with <code>magpie plugin login grok</code>, installs it first, as xAI’s installer does: the stable version from <code>x.ai/cli</code>, kept in <code>/config/home/.grok</code>. To use a Grok Build binary you put on the volume yourself, set <code>GROK_BIN_DIR</code> to the folder holding it.</p>
 
+    <h2 id="mcp"><a class="anchor" href="#mcp">MCP servers</a></h2>
+    <p>The Library’s MCP servers run in the container, and the image has what they start with: <code>npx</code>, <code>node</code> and <code>npm</code> (Node 24), and <code>uvx</code>, <code>uv</code>, <code>python</code> and <code>python3</code>. A server started with <code>uvx</code> or <code>python</code> downloads its Python into the volume the first time, which takes a few seconds. A server started with <code>docker</code> doesn’t run: the container has no Docker of its own.</p>
+    <p>The image has no browser. Chrome DevTools’ and Playwright’s MCP servers start a Chrome of their own, so in the container their row in the Library says <span class="ui">no Chrome here</span>. Use <a href="#browser">Magpie Browser</a> instead, which acts in your own browser, or point the server at a Chrome it can reach: <code>--browserUrl http://host:9222</code> for Chrome DevTools, <code>--cdp-endpoint</code> for Playwright.</p>
+
     <h2 id="browser"><a class="anchor" href="#browser">Your own browser</a></h2>
     <p>Magpie Browser lets agents act in your own browser, through its extension. The extension can’t be loaded from the container’s folders, so in the browser UI open <span class="ui">Library</span> → <span class="ui">Magpie Browser</span> and click <span class="ui">Download the extension</span>. The zip is pointed at the page’s own address, with a gateway key named <b>Magpie Browser</b> of its own. Unzip it, open <code>chrome://extensions</code>, turn on Developer mode and click <span class="ui">Load unpacked</span> on the unzipped folder. An extension already loaded takes the address (<code>http://localhost:3430</code>, or the gateway’s published port) and a gateway key in its popup.</p>
     <p>The Magpie Browser key connects the extension and nothing else: it can’t use models, MCP servers or stats, so a copy of the zip left in Downloads spends nothing. The host’s browser reaches the container from Docker’s bridge, not from the container’s own computer, so it is that key’s alone and the container’s agents don’t use it yet (<a href="https://github.com/yetone/magpie/issues/5529">#5529</a>). To use it from an agent on the host, give that agent a gateway key of its own with full access, connect the extension with the same key in its popup, and call <code>/mcp/magpie/browser</code> with it. A browser given another key is that key’s alone, and it is let go once its key is turned off, removed or rotated.</p>
@@ -179,6 +232,7 @@ docker logs magpie</pre>
       <tr><td><code>MAGPIE_ADDR</code></td><td>where the gateway listens. The image sets <code>0.0.0.0:3425</code>, so the published port reaches it.</td></tr>
       <tr><td><code>MAGPIE_PUBLIC_URL</code></td><td>the address other machines reach the gateway at, such as <code>http://192.168.1.20:3425</code> (the host’s or the NAS’s, on the published port), or a reverse proxy’s base URL. In the container magpie sees only Docker’s own <code>172.17.x</code> address; with this set, the address it shows and prints is the one to use.</td></tr>
       <tr><td><code>MAGPIE_WEB_KEY</code></td><td>the browser UI’s key, kept across restarts (16+ characters)</td></tr>
+      <tr><td><code>MAGPIE_NAME</code></td><td>what this magpie is called: the browser tab’s title reads <code>&lt;name&gt; · magpie</code>, to tell several deployments apart. A name set on the page, in <span class="ui">Settings</span> → <span class="ui">Network and sharing</span> → <span class="ui">Advanced</span> → <span class="ui">Name</span>, comes first.</td></tr>
       <tr><td><code>MAGPIE_TLS_CERT</code>, <code>MAGPIE_TLS_KEY</code></td><td>a PEM certificate (its chain after it) and its key, mounted into the container: other machines then reach the gateway and the browser UI over <code>https://</code> only, and plain HTTP from them gets 400. The files are read again when they change, so a renewal needs no restart. One without the other, or files that don’t load, stop magpie from starting. Use <code>https://</code> in <code>MAGPIE_PUBLIC_URL</code> too.</td></tr>
       <tr><td><code>MAGPIE_ALLOW_IPS</code></td><td>the only addresses other machines may reach the gateway and the browser UI from, as IPs and CIDR ranges: <code>203.0.113.7,10.0.0.0/8,2001:db8::/32</code>. Any other address gets 403, even with a gateway key. Unset lets every address in, each with a key. See <a href="#allow">Allowed addresses</a>.</td></tr>
       <tr><td><code>HOME</code>, <code>XDG_CONFIG_HOME</code>, <code>XDG_CACHE_HOME</code>, <code>XDG_DATA_HOME</code>, <code>XDG_STATE_HOME</code></td><td>set by the image to the folders under <code>/config</code> above; leave them</td></tr>

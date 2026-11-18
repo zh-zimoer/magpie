@@ -53,6 +53,8 @@ func (h *host) watchTrayUsage() {
 			cancel()
 			if s.TrayNoLogos {
 				cells = trayPlain(cells)
+			} else if s.TrayAnthropicMark {
+				cells = trayAnthropic(cells)
 			}
 			if tip == "" {
 				currency, rate := trayCurrency()
@@ -155,7 +157,7 @@ func (h *host) trayCellClick(id string) {
 	if id == "" {
 		return
 	}
-	if settings.Load().Tray == "window" {
+	if settings.Shared().Tray == "window" {
 		h.ShowMain(quotaView(id))
 		return
 	}

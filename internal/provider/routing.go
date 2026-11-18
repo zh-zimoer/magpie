@@ -10,7 +10,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // The routings besides the default, smart, in order.
@@ -74,7 +74,7 @@ func FreePlan(plan string) bool {
 }
 
 // pluginRouting is a routing a plugin serves: "<plugin>/<name>".
-var pluginRouting = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+var pluginRouting = lazyre.New(`^[A-Za-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // PluginRouting says whether routing is one a plugin serves,
 // "<plugin>/<name>" (a JS gateway plugin's strategies). providers.json
@@ -114,6 +114,17 @@ func SetUseFirst(id string, on bool) error {
 		return err
 	}
 	p.UseFirst = on
+	return Save(*p)
+}
+
+// SetNoStandIn keeps another model's request off a provider, or lets it
+// stand in for any again (Provider.NoStandIn).
+func SetNoStandIn(id string, on bool) error {
+	p, err := Find(id)
+	if err != nil {
+		return err
+	}
+	p.NoStandIn = on
 	return Save(*p)
 }
 
@@ -359,6 +370,10 @@ type Limit struct {
 	// account at (WindowCaps.own); it rides in pool, never in the
 	// allowance itself
 	aside bool
+	// extra is set beside aside on a Claude account's extra usage
+	// (QuotaWindow.Extra): its cap holds the account as
+	// ClaudeNoExtraUsage would (Allowance.extraCapped), not outright
+	extra bool
 	// ResetRunsOut is when the reset the account spends by itself before
 	// it runs out does (resetRunsOut): spent then, it starts this window
 	// again — at Restarts, which routing takes for the window's renewal
@@ -510,20 +525,39 @@ func (a Allowance) CapUsed(model string, now time.Time) float64 {
 // Zero when that window's reset isn't known, or has passed (it is empty
 // again then, its next reset not known).
 func (a Allowance) Fullest(model string, now time.Time) time.Time {
+	at, _ := a.fullest(model, now)
+	return at
+}
+
+// FullestName is the name of the window For's share is of (Fullest's),
+// when more than one window counts model: the share alone ("41% used")
+// read as the five hours on the Routing page while it was the week's,
+// the five hours at 0% (Wing8Aqua on X). Empty when one window, or none,
+// counts it, or the vendor didn't name it.
+func (a Allowance) FullestName(model string, now time.Time) string {
+	_, name := a.fullest(model, now)
+	return name
+}
+
+func (a Allowance) fullest(model string, now time.Time) (time.Time, string) {
 	model = strings.ToLower(model)
-	used, at := -1.0, time.Time{}
+	used, at, name, n := -1.0, time.Time{}, "", 0
 	for _, l := range a {
 		if !l.applies(model) {
 			continue
 		}
+		n++
 		if !l.Resets.IsZero() && !l.Resets.After(now) {
 			l.Used, l.Resets = 0, time.Time{}
 		}
 		if l.Used > used || l.Used == used && l.Resets.After(at) {
-			used, at = l.Used, l.Resets
+			used, at, name = l.Used, l.Resets, l.Name
 		}
 	}
-	return at
+	if n < 2 {
+		name = ""
+	}
+	return at, name
 }
 
 // Count is the count of the window For's share is of — the fullest that
@@ -665,6 +699,38 @@ func (a Allowance) Lapse(model string, now time.Time) time.Time {
 	return t
 }
 
+// lapseHorizon is how far ahead credits about to be lost count as spent
+// already: all of them within a week, none past it (Allowance.Lapsing).
+// They were faded across the week before, so a daily check-in reward of a
+// few dozen credits, a fraction of a point of a 5000-credit pool, fell
+// under the threshold until its last hours (kudi3699 on X).
+const lapseHorizon = 7 * 24 * time.Hour
+
+// Lapsing is the share of an allowance, in points of the 0–100 used share,
+// that is lost soon whatever is done: what a window that counts model
+// loses at RunsOut (RunsOutLeft of Of, never more than it has left), when
+// that is within lapseHorizon. Credits that are
+// lost unspent cost nothing to spend, so a ranking by the share used takes
+// them off it, and an account whose month is half used but whose check-in
+// credits lapse tomorrow is not kept behind a fresh one (kudi3699 on X).
+// Zero when no window says how much lapses: the amount is never guessed
+// from what is left. The most of any window's, as they overlap.
+func (a Allowance) Lapsing(model string, now time.Time) float64 {
+	model = strings.ToLower(model)
+	best := 0.0
+	for _, l := range a {
+		if !l.applies(model) || !l.RunsOut.After(now) || l.RunsOutLeft <= 0 || l.Of <= 0 {
+			continue
+		}
+		if l.RunsOut.Sub(now) >= lapseHorizon {
+			continue
+		}
+		u := min(100, max(0, l.Used))
+		best = max(best, min(100*l.RunsOutLeft/l.Of, 100-u))
+	}
+	return best
+}
+
 // Full is when an account used up for model can take it again: the last
 // reset of its windows that are full, zero when none is or it isn't known.
 func (a Allowance) Full(model string, share float64, now time.Time) time.Time {
@@ -676,6 +742,14 @@ func (a Allowance) Full(model string, share float64, now time.Time) time.Time {
 		}
 	}
 	return t
+}
+
+// Scoped says whether some window of the allowance counts some models only
+// and counts model: Opus's or Fable's own week. A refusal of model with none
+// of its windows read full may be that window's, read before it filled.
+func (a Allowance) Scoped(model string) bool {
+	model = strings.ToLower(model)
+	return slices.ContainsFunc(a, func(l Limit) bool { return (l.Model != "" || l.matches != nil) && l.applies(model) })
 }
 
 // Pooled says whether a refusal of model for its allowance leaves the
@@ -832,8 +906,18 @@ func (l Limit) expiring(u float64, now, ends time.Time) (pace float64, at time.T
 // Allowances is each of an agent's accounts' allowance by user, as last
 // known, asked for again in the background when that was over a minute
 // ago. Only the very first ask waits, and not for long. An account
-// missing is one not known yet.
+// missing is one not known yet. A ChatGPT API account is known by the
+// same ChatGPT account's Codex reading (samePlanAllowances).
 func Allowances(agent string) map[string]Allowance {
+	m := readAllowances(agent)
+	if agent == ChatGPTAPIID {
+		m = samePlanAllowances(m)
+	}
+	return m
+}
+
+// readAllowances is Allowances as agent's own readings tell it.
+func readAllowances(agent string) map[string]Allowance {
 	c := &usedCache
 	c.Lock()
 	if c.m == nil {
@@ -878,7 +962,7 @@ func Allowances(agent string) map[string]Allowance {
 				}
 				c.read[key] = st
 			}
-			var renewed, restarts []string
+			var renewed, restarts, credits []string
 			for user, a := range all {
 				key := agent + "/" + strings.ToLower(user)
 				if c.renewed[key] > began {
@@ -894,6 +978,11 @@ func Allowances(agent string) map[string]Allowance {
 					}
 					if a.startedAgain(was.a, was.at, share, now) {
 						restarts = append(restarts, user)
+					}
+					if a.OnCredits() && !was.a.OnCredits() {
+						// credits it was not read to hold: bought once
+						// its allowance ran out (NoteCodexCredits)
+						credits = append(credits, user)
 					}
 				}
 				c.seen[key] = reading{a, now}
@@ -928,6 +1017,11 @@ func Allowances(agent string) map[string]Allowance {
 			}
 			for _, user := range restarts {
 				tellStarted(agent, user)
+			}
+			for _, user := range credits {
+				if agent != "codex" || CodexCredits(user) {
+					tellCredits(agent, user)
+				}
 			}
 			close(done)
 		})
@@ -972,7 +1066,7 @@ func ReadUsageNow(ctx context.Context, agent string, users ...string) bool {
 	}
 	c := &usedCache
 	for range 3 {
-		Allowances(agent)
+		readAllowances(agent)
 		c.Lock()
 		done, back := c.loading[agent], !c.at[agent].IsZero()
 		c.Unlock()
@@ -1080,7 +1174,7 @@ func AwaitAllowance(ctx context.Context, agent, user string) bool {
 		return false
 	}
 	for range 3 {
-		Allowances(agent)
+		readAllowances(agent)
 		c.Lock()
 		done := c.loading[agent]
 		c.Unlock()
@@ -1261,7 +1355,9 @@ func allowanceOf(ws []QuotaWindow, now time.Time) Allowance {
 		if !w.Aside || w.Text || w.Model != "" || w.PoolWindow() {
 			continue
 		}
-		al := Limit{Used: w.Used, Span: w.Span, Name: w.Name, Resets: resets(w), aside: true}
+		// with its count, so a cap of an amount of its unit holds too
+		al := Limit{Used: w.Used, Span: w.Span, Name: w.Name, Resets: resets(w), aside: true,
+			Amount: w.Amount, Of: w.Limit, Unit: w.Unit, extra: w.Extra}
 		for i := range a {
 			a[i].pool = append(a[i].pool, al)
 		}

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Docker · magpie ドキュメント</title>
+<title>Docker で magpie を動かす：サーバーや NAS の AI ゲートウェイ · magpie ドキュメント</title>
 <meta name="description" content="サーバーや NAS で magpie を Docker で動かす：ghcr.io/yetone/magpie イメージのポート、ボリューム、環境変数、ブラウザ UI、サブスクリプションへのサインイン、ゲートウェイキーでの共有、Compose の例。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -39,6 +39,54 @@
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/ja/docker">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "Docker で magpie を動かす",
+   "description": "サーバーや NAS で magpie を Docker で動かす：ghcr.io/yetone/magpie イメージのポート、ボリューム、環境変数、ブラウザ UI、サブスクリプションへのサインイン、ゲートウェイキーでの共有、Compose の例。",
+   "inLanguage": "ja",
+   "url": "https://usemagpie.ai/docs/ja/docker",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/ja/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "ドキュメント",
+     "item": "https://usemagpie.ai/docs/ja/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "Docker で magpie を動かす",
+     "item": "https://usemagpie.ai/docs/ja/docker"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -87,6 +135,7 @@
     <a href="#run">起動する</a>
     <a href="#web">ブラウザ UI</a>
     <a href="#signin">サブスクリプションにサインイン</a>
+    <a href="#mcp">MCP サーバー</a>
     <a href="#browser">自分のブラウザ</a>
     <a href="#volume">保存されるもの</a>
     <a href="#env">環境変数</a>
@@ -102,7 +151,7 @@
 
     <div class="table-wrap"><table>
       <tr><td><b>イメージ</b></td><td><code>ghcr.io/yetone/magpie</code>（<code>linux/amd64</code> と <code>linux/arm64</code>）</td></tr>
-      <tr><td><b>タグ</b></td><td><code>latest</code>（最新リリース）、<code>daily</code>（毎日 20:00 UTC にその時点の最新リリースへ移る。1 日 1 回だけ）、<code>stable</code>（デスクトップ版の Stable チャンネルと同じ：公開から 3 日たったリリースが週に 1 つ、緊急リリースはすぐ）、<code>0.1.1150</code>（特定のリリース）、<code>0.1</code>、<code>edge</code>（<code>main</code> の変更ごと）</td></tr>
+      <tr><td><b>タグ</b></td><td><code>latest</code>（最新リリース）、<code>daily</code>（デスクトップ版の Daily チャンネルと同じ：毎日 20:00 UTC に、その時点で CI に通った最新リリースへ移る。1 日 1 回だけ、緊急リリースはすぐ）、<code>stable</code>（デスクトップ版の Stable チャンネルと同じ：公開から 3 日たったリリースが週に 1 つ、緊急リリースはすぐ）、<code>0.1.1150</code>（特定のリリース）、<code>0.1</code>、<code>edge</code>（<code>main</code> の変更ごと）</td></tr>
       <tr><td><b>ポート</b></td><td><code>3425</code> はエージェントが呼ぶゲートウェイ、<code>3430</code> はコンテナが <code>magpie web</code> を動かすときのブラウザ UI。ゲートウェイの <code>/v1</code> ルートにも応えるので、リバースプロキシはこのポートだけで足ります</td></tr>
       <tr><td><b>ボリューム</b></td><td><code>/config</code>：プロバイダ、キー、サインイン、プラグイン、使用量</td></tr>
       <tr><td><b>ユーザー</b></td><td>nonroot（uid 65532）</td></tr>
@@ -158,6 +207,10 @@ docker logs magpie</pre>
     </div>
     <p>Grok（SuperGrok）サブスクリプションは xAI の Grok Build CLI でサインインしますが、これもイメージにはありません。ブラウザ UI や <code>magpie plugin login grok</code> でサインインすると、magpie が xAI のインストーラーと同じ方法で先にインストールします。<code>x.ai/cli</code> の stable 版を <code>/config/home/.grok</code> に置きます。自分でボリュームに置いた Grok Build を使うときは、<code>GROK_BIN_DIR</code> にそのフォルダを指定します。</p>
 
+    <h2 id="mcp"><a class="anchor" href="#mcp">MCP サーバー</a></h2>
+    <p>ライブラリの MCP サーバーはコンテナの中で動き、イメージには起動に使うコマンドが入っています：<code>npx</code>、<code>node</code>、<code>npm</code>（Node 24）と、<code>uvx</code>、<code>uv</code>、<code>python</code>、<code>python3</code>。<code>uvx</code> や <code>python</code> で起動するサーバーは、初回に Python をボリュームへダウンロードするので数秒かかります。<code>docker</code> で起動するサーバーは動きません：コンテナには自前の Docker がありません。</p>
+    <p>イメージにはブラウザがありません。Chrome DevTools と Playwright の MCP サーバーは自分で Chrome を起動するため、コンテナではライブラリの行に <span class="ui">ここに Chrome がありません</span> と出ます。代わりに、あなた自身のブラウザで操作する <a href="#browser">Magpie Browser</a> を使うか、サーバーが届く Chrome を指定してください：Chrome DevTools は <code>--browserUrl http://host:9222</code>、Playwright は <code>--cdp-endpoint</code>。</p>
+
     <h2 id="browser"><a class="anchor" href="#browser">自分のブラウザ</a></h2>
     <p>Magpie Browser は拡張機能を通して、エージェントにあなた自身のブラウザを操作させます。コンテナ内のフォルダは拡張機能として読み込めないので、ブラウザ UI で <span class="ui">ライブラリ</span> → <span class="ui">Magpie Browser</span> を開き、<span class="ui">拡張機能をダウンロード</span> をクリックします。zip はこのページ自身のアドレスを指し、<b>Magpie Browser</b> という名前の専用ゲートウェイキーが入っています。展開して <code>chrome://extensions</code> を開き、デベロッパー モードをオンにして、展開したフォルダを <span class="ui">パッケージ化されていない拡張機能を読み込む</span> で選びます。読み込み済みの拡張機能は、ポップアップでアドレス（<code>http://localhost:3430</code> か、ゲートウェイを公開したポート）とゲートウェイキーを受け付けます。</p>
     <p>Magpie Browser キーは拡張機能の接続専用で、モデル、MCP サーバー、統計は使えません。ダウンロードフォルダに残った zip のコピーで利用枠が使われることはありません。ホストのブラウザは Docker のブリッジ経由でコンテナにつながり、コンテナと同じコンピュータからの接続ではないため、そのキーだけのものになり、コンテナ内のエージェントはまだ使えません（<a href="https://github.com/yetone/magpie/issues/5529">#5529</a>）。ホストのエージェントから使うには、そのエージェントにフルアクセスのゲートウェイキーを渡し、拡張機能のポップアップで同じキーを入れて接続し、そのキーで <code>/mcp/magpie/browser</code> を呼びます。別のキーで接続したブラウザはそのキーだけのもので、キーを無効化、削除、ローテーションすると接続は切れます。</p>
@@ -179,6 +232,7 @@ docker logs magpie</pre>
       <tr><td><code>MAGPIE_ADDR</code></td><td>ゲートウェイが待ち受けるアドレス。イメージでは <code>0.0.0.0:3425</code> に設定され、公開したポートから届きます。</td></tr>
       <tr><td><code>MAGPIE_PUBLIC_URL</code></td><td>ほかのマシンがゲートウェイに届くアドレス。例：<code>http://192.168.1.20:3425</code>（ホストや NAS のアドレスと公開ポート）、またはリバースプロキシのベース URL。コンテナ内の magpie には Docker 自身の <code>172.17.x</code> のアドレスしか見えません。これを設定すると、表示されるアドレスが使うべきものになります。</td></tr>
       <tr><td><code>MAGPIE_WEB_KEY</code></td><td>ブラウザ UI のキー。再起動しても変わりません（16 文字以上）</td></tr>
+      <tr><td><code>MAGPIE_NAME</code></td><td>この magpie の名前。ブラウザのタブのタイトルが <code>&lt;名前&gt; · magpie</code> になり、複数デプロイしたときに見分けられます。ページの <span class="ui">設定</span> → <span class="ui">ネットワークと共有</span> → <span class="ui">詳細設定</span> → <span class="ui">名前</span> で付けた名前が優先されます。</td></tr>
       <tr><td><code>MAGPIE_TLS_CERT</code>、<code>MAGPIE_TLS_KEY</code></td><td>コンテナにマウントした PEM の証明書（後ろにチェーン）と秘密鍵。ほかのマシンはゲートウェイとブラウザ UI に <code>https://</code> でだけ届き、平文の HTTP は 400 になります。ファイルが変わると読み直すので、更新に再起動はいりません。片方だけ、または読めないファイルでは magpie は起動しません。<code>MAGPIE_PUBLIC_URL</code> も <code>https://</code> にしてください。</td></tr>
       <tr><td><code>MAGPIE_ALLOW_IPS</code></td><td>ほかのマシンがゲートウェイとブラウザ UI に接続できるアドレス。IP または CIDR 範囲で書きます：<code>203.0.113.7,10.0.0.0/8,2001:db8::/32</code>。ほかのアドレスからは、ゲートウェイキーがあっても 403 になります。設定しなければすべてのアドレスから接続でき、それぞれキーが要ります。<a href="#allow">許可するアドレス</a>を参照。</td></tr>
       <tr><td><code>HOME</code>、<code>XDG_CONFIG_HOME</code>、<code>XDG_CACHE_HOME</code>、<code>XDG_DATA_HOME</code>、<code>XDG_STATE_HOME</code></td><td>イメージが上の <code>/config</code> 配下のフォルダに設定しています。変えないでください</td></tr>

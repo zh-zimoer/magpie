@@ -22,14 +22,15 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -525,6 +526,9 @@ func (s *server) generate(raw json.RawMessage, used *string, c caller) (string, 
 	if len(out.Data) == 0 {
 		return "", errors.New("no image came back")
 	}
+	// the reply's bytes are the images' base64 a second time: what is read
+	// from here is the strings parsed out of them, each dropped once decoded
+	defer debug.FreeOSMemory()
 	// an image that was drawn, and paid for, is never dropped unsaid: one
 	// that can't be had is answered by where the vendor keeps it, beside
 	// those saved (#1576)
@@ -537,6 +541,7 @@ func (s *server) generate(raw json.RawMessage, used *string, c caller) (string, 
 				lost = append(lost, fmt.Sprintf("image %d came back broken: %v", i+1, err))
 				continue
 			}
+			out.Data[i].B64 = ""
 		case d.URL != "":
 			if img, mt, err = gateway.FetchImage(context.Background(), gateway.PublicClient(), d.URL); err != nil {
 				lost = append(lost, fmt.Sprintf("image %d was drawn but couldn't be downloaded (%v); the vendor keeps it at %s for a while: download it from there", i+1, err, d.URL))
@@ -719,7 +724,7 @@ func Target(dir, path, prompt, ext string, i, n int) (string, error) {
 	return target(dir, path, prompt, ext, i, n)
 }
 
-var unslug = regexp.MustCompile(`[^a-z0-9]+`)
+var unslug = lazyre.New(`[^a-z0-9]+`)
 
 // target is where the i-th of n images goes: path as a file (numbered when
 // n > 1) or a folder, else generated-images/<words of the prompt>-<time>.
@@ -1047,7 +1052,7 @@ func (s *server) ask(method string, params any) (json.RawMessage, int, error) {
 // asked.
 func (s *server) modelProps() map[string]any {
 	out := map[string]any{
-		tool:      map[string]any{"type": "string", "description": "The image model to use, as provider/model. Leave it out to use the one set in Magpie (Settings → Images → Image generation)."},
+		tool:      map[string]any{"type": "string", "description": "The image model to use, as provider/model. Leave it out to use the one set in Magpie (Settings → Models → Images → Image generation)."},
 		videoTool: map[string]any{"type": "string", "description": "The video model to use, as provider/model. Leave it out to use the video model set up in Magpie."},
 	}
 	res, _, err := s.ask("tools/list", map[string]any{})

@@ -64,11 +64,11 @@ func specOf(s *Server) (runSpec, bool) {
 	if s.Remote() || s.Command == "" {
 		return runSpec{}, false
 	}
-	env, unset := expandAll(s.Env)
+	cmd, args, own := launchCmd(s, "")
+	env, unset := expandAll(own)
 	if len(unset) > 0 {
 		return runSpec{}, false
 	}
-	cmd, args := launchCmd(s, "")
 	return runSpec{Command: cmd, Args: slices.Clone(args), Env: env}, true
 }
 
@@ -626,6 +626,7 @@ func ServeRun(w http.ResponseWriter, r *http.Request, name string) {
 		return
 	}
 	if m.Method == "initialize" {
+		m.Params = namedIfNone(m.Params, gateway.RunClient(r))
 		runInitialize(w, name, spec, m)
 		return
 	}
@@ -633,7 +634,10 @@ func ServeRun(w http.ResponseWriter, r *http.Request, name string) {
 		http.Error(w, "no Mcp-Session-Id: initialize first", http.StatusBadRequest)
 		return
 	}
-	s := session(sid, name, spec, defaultInit())
+	// a session magpie didn't see start (Codex kept it across a restart)
+	// has no initialize to tell its server who the client is: the
+	// request does (#6392)
+	s := session(sid, name, spec, namedInit(defaultInit(), gateway.RunClient(r)))
 	w.Header().Set("Mcp-Session-Id", sid)
 	s.mu.Lock()
 	s.last = time.Now()
@@ -673,6 +677,11 @@ func ServeRun(w http.ResponseWriter, r *http.Request, name string) {
 		runReply(w, rpcError(m.ID, -32603, err.Error()))
 		return
 	}
+	var events chan []byte
+	if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+		events = s.open()
+		defer s.close(events)
+	}
 	reply := c.wait(m.ID)
 	if err := c.send(line.Bytes()); err != nil {
 		c.unwait(m.ID)
@@ -690,7 +699,7 @@ func ServeRun(w http.ResponseWriter, r *http.Request, name string) {
 			remember(spec, m.Method, r.Result)
 		}
 	}
-	if !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+	if events == nil {
 		select {
 		case b, ok := <-reply:
 			if !ok {
@@ -704,8 +713,6 @@ func ServeRun(w http.ResponseWriter, r *http.Request, name string) {
 		}
 		return
 	}
-	events := s.open()
-	defer s.close(events)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -779,7 +786,7 @@ func runStream(w http.ResponseWriter, r *http.Request, name, sid string) {
 		http.Error(w, "no session", http.StatusNotFound)
 		return
 	}
-	s := session(sid, name, spec, defaultInit())
+	s := session(sid, name, spec, namedInit(defaultInit(), gateway.RunClient(r)))
 	events := make(chan []byte, 64)
 	s.mu.Lock()
 	// below the requests' streams, which are newer
@@ -809,6 +816,36 @@ func defaultInit() json.RawMessage {
 	}
 	_ = json.Unmarshal(initializeReq(), &m)
 	return m.Params
+}
+
+// namedInit is init with the client called name.
+func namedInit(init json.RawMessage, name string) json.RawMessage {
+	var p map[string]json.RawMessage
+	if json.Unmarshal(init, &p) != nil || p == nil {
+		p = map[string]json.RawMessage{}
+	}
+	var ci map[string]any
+	_ = json.Unmarshal(p["clientInfo"], &ci)
+	if ci == nil {
+		ci = map[string]any{}
+	}
+	ci["name"] = name
+	p["clientInfo"], _ = json.Marshal(ci)
+	b, _ := json.Marshal(p)
+	return b
+}
+
+// namedIfNone is init, the client called name when it names none.
+func namedIfNone(init json.RawMessage, name string) json.RawMessage {
+	var p struct {
+		ClientInfo struct {
+			Name string `json:"name"`
+		} `json:"clientInfo"`
+	}
+	if json.Unmarshal(init, &p) == nil && strings.TrimSpace(p.ClientInfo.Name) != "" {
+		return init
+	}
+	return namedInit(init, name)
 }
 
 func hasCursor(params json.RawMessage) bool {

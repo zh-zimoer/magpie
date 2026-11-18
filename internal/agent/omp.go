@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -23,6 +22,7 @@ import (
 	"github.com/yetone/magpie/internal/dirent"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"gopkg.in/yaml.v3"
 )
@@ -89,12 +89,12 @@ func ompYAMLList(v string) bool { return strings.HasPrefix(v, "[") || strings.Ha
 
 // ompProfileName is a profile name omp takes (pi-utils dirs.ts,
 // normalizeProfileName); it refuses any other.
-var ompProfileName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+var ompProfileName = lazyre.New(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
 // ompReserved is a Windows device name omp refuses on every platform
 // (pi-utils dirs.ts, normalizeProfileName): CON, PRN, AUX, NUL, COM0–COM9,
 // LPT0–LPT9, and the same with a dot and anything after (con.work).
-var ompReserved = regexp.MustCompile(`(?i)^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\..*)?$`)
+var ompReserved = lazyre.New(`(?i)^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\..*)?$`)
 
 // ompProfileOK says whether name is one omp takes as a profile (pi-utils
 // dirs.ts): "default" is none, a trailing dot is refused, and so is a
@@ -199,8 +199,6 @@ func ompIn(at place) *Agent {
 // ompAt is omp with its agent folder at dir, magpie's entry in its
 // models.yml being entry's.
 func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
-	// magpie's entry laid over the one in the models file at path (ompKept)
-	ompProvider := func(path string) any { return ompKept(path, entry()) }
 	// omp reads the .yml and falls back to the .yaml
 	pick := func(name string) string {
 		yml := filepath.Join(dir, name+".yml")
@@ -208,6 +206,13 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			return filepath.Join(dir, name+".yaml")
 		}
 		return yml
+	}
+	// the protocol picked in its row (omp_protocol.go)
+	protocol := ompProtocolKey(at, dir)
+	// magpie's entry, on the protocol picked, laid over the one in the
+	// models file at path (ompKept), an api the user typed there kept
+	ompProvider := func(path string) any {
+		return ompKept(path, ompAPIKept(path, ompOn(entry(), ompProtocol(protocol))))
 	}
 	path := pick("config")
 	// the entries of enabledModels a sync took out (scope_gone.go)
@@ -406,6 +411,31 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		}
 		return nil
 	}
+	// a model picked for the advisor is one the user wants reviewing: omp
+	// runs none while advisor.enabled is unset (its default is off), so the
+	// pick turns it on then (#6408, #5019), and the role reset takes back
+	// what the pick turned on. One the user set either way stays theirs
+	advisor := slices.IndexFunc(roles, func(f Field) bool { return f.Key == "advisor" })
+	setAdvisor := roles[advisor].Set
+	roles[advisor].Set = func(v string) error {
+		if err := setAdvisor(v); err != nil {
+			return err
+		}
+		if v == "" {
+			if unstash(ompAdvisorTurnedOn(path)) != "" && ompAdvisorOn(path) == "true" {
+				return edit.DelYAML(path, "advisor.enabled")
+			}
+			return nil
+		}
+		if ompAdvisorOn(path) != "" {
+			return nil
+		}
+		if err := edit.SetYAML(path, edit.KV{Path: "advisor.enabled", Value: true}); err != nil {
+			return err
+		}
+		stash(map[string]string{ompAdvisorTurnedOn(path): "1"})
+		return nil
+	}
 	// each role but the default one has a thinking level of its own, the
 	// ":level" omp reads off the end of the role's model
 	// (splitThinkingSuffix, resolveModelRoleValue): #1397, the slow role at
@@ -534,7 +564,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			}
 			return ""
 		},
-		Fields: append(fields, Field{
+		Fields: append(append(fields, Field{
 			// the thinking level sessions start with, as omp's settings save
 			// it; unset omp takes high. auto has omp pick a level each turn:
 			// not a level a model lists, so it is offered here and kept out of
@@ -549,7 +579,12 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 				return edit.SetYAML(path, edit.KV{Path: "defaultThinkingLevel", Value: v})
 			},
 			Options: func(map[string]string) []Option { return static(append([]string{"auto"}, ompEfforts...)...) },
-		}),
+		}), append(ompAdvisorFields(path), protocolField(at, protocol, pick("models"), func() (string, bool) {
+			models := pick("models")
+			v, _ := edit.GetYAML(models, "providers."+magpieID+".api")
+			_, has := edit.GetYAMLText(models, "providers."+magpieID)
+			return v, has
+		}, writeMagpie, func() bool { return false }))...),
 	}
 }
 
@@ -664,6 +699,12 @@ func ompProviderAt(gw, version string) ompProviderEntry {
 			e.API = "openai-responses"
 		case slices.Contains(m.APIs, string(provider.Anthropic)):
 			e.API, e.BaseURL = "anthropic-messages", gw
+			// not gateway.AsksAdaptively, as dsh and Pi: omp's budget
+			// isn't clamped (xhigh and max are 32768, which the gateway
+			// and agy-cli read as xhigh), and its anthropic-adaptive
+			// turns reasoning off by leaving thinking out at the lowest
+			// effort, which a model that can stop thinking (a GLM)
+			// takes as thinking on (#6778)
 			mode = "budget"
 			if gateway.AdaptiveThinking(m.ID) {
 				mode = "anthropic-adaptive"
@@ -730,7 +771,7 @@ func ompProviderAt(gw, version string) ompProviderEntry {
 // the whole file away over an api it doesn't list.
 const ompKindSince = "18.7.0"
 
-// ompImageModels are magpie's image models (Settings › Images, as
+// ompImageModels are magpie's image models (Settings › Models › Images, as
 // generate_image offers them) as omp's image role takes them (treeman_26897
 // on Discord): kind image on openai-images, which omp's generate_image
 // posts to the provider's baseUrl + /images/generations, or /images/edits

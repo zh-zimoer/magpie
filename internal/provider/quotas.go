@@ -56,7 +56,7 @@ func quotas(ctx context.Context) (subs, plans, balances []SubscriptionQuota) {
 	go func() { p <- PlanQuotas(ctx) }()
 	go func() { r <- RemoteCards(ctx) }()
 	plans, subs = seatCards(<-p, SubscriptionUsage(ctx))
-	subs, balances = withAccountNames(subs), <-b
+	subs, balances = WithImageLane(withAccountNames(subs), time.Now()), <-b
 	// a remote magpie's cards, each after this computer's of its kind
 	for _, q := range <-r {
 		switch q.Kind {
@@ -132,6 +132,8 @@ type QuotaSpan struct {
 	// Text: the window is its Display alone, Used and Remaining no
 	// reading (QuotaWindow.Text)
 	Text bool `json:"text,omitempty"`
+	// Lane names an allowance apart from the account's own (QuotaWindow.Lane)
+	Lane string `json:"lane,omitempty"`
 	// Amount of Limit in Unit: the window's count, used, when the vendor
 	// counts it so ("credits")
 	Amount float64 `json:"amount,omitempty"`
@@ -147,6 +149,10 @@ type QuotaSpan struct {
 	// Balance is how much is left in Unit, a prepaid wallet's reading
 	// (QuotaWindow.Balance, #3950): Used and Remaining are then no share.
 	Balance *float64 `json:"balance,omitempty"`
+	// Spent is what magpie counted such a wallet spending since
+	// SpentSince, its period's first reading (QuotaWindow.Spent, #5770).
+	Spent      *float64   `json:"spent,omitempty"`
+	SpentSince *time.Time `json:"spentSince,omitempty"`
 	// Holds and HoldsWhy are the window's whole as the Usage page's card
 	// tells it (QuotaWindow.Holds, #2333): reckoned when ReckonHolds is
 	// set, else left out.
@@ -202,8 +208,9 @@ func quotaReport(subs, plans, balances []SubscriptionQuota, now time.Time) []Quo
 			// a pool's own windows stand in for the models' drawing on it,
 			// as the usage page shows them
 			for _, w := range PooledWindows(q.Windows) {
-				s := QuotaSpan{Unlimited: w.Unlimited, Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display, Text: w.Text,
-					Amount: w.Amount, Limit: w.Limit, Unit: w.Unit, Pool: w.Pool, RunsOutAt: w.RunsOutAt, RunsOut: w.RunsOut, Balance: w.Balance, Holds: w.Holds, HoldsWhy: w.HoldsWhy}
+				s := QuotaSpan{Unlimited: w.Unlimited, Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display, Text: w.Text, Lane: w.Lane,
+					Amount: w.Amount, Limit: w.Limit, Unit: w.Unit, Pool: w.Pool, RunsOutAt: w.RunsOutAt, RunsOut: w.RunsOut, Balance: w.Balance,
+					Spent: w.Spent, SpentSince: w.SpentSince, Holds: w.Holds, HoldsWhy: w.HoldsWhy}
 				if s.ResetsAt == nil && w.ResetSecs > 0 {
 					t := now.Add(time.Duration(w.ResetSecs) * time.Second)
 					s.ResetsAt = &t

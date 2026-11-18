@@ -22,11 +22,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,8 +35,10 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/settings"
@@ -73,6 +75,17 @@ type List struct {
 
 var listMu sync.Mutex
 
+// listFileMu is held through every read a change is made from and its
+// write of plugins.json (the mutators below): the gateway that runs all
+// day and a magpie run from a terminal (`magpie plugin options …`, the
+// plugin manager) are separate processes, and listMu never saw the other
+// one, so the later whole-list write went out with what the other had
+// saved since its read (#4666). Under it every change reads the file
+// afresh, so both changes stand. A lock another magpie holds is waited
+// for up to filelock.Wait, then gone on without, as before there was
+// one; the same shape as mcpauth's fileMu.
+var listFileMu = filelock.Mutex{Path: func() string { return listPath() + ".lock" }}
+
 // bunMu is held through each bun command that changes plugins/ (add,
 // update, remove). Two at once read package.json and bun.lock before
 // either writes them, so one's change is lost (#2002, anganing: after an
@@ -88,7 +101,13 @@ func runBun(ctx context.Context, bun string, args ...string) ([]byte, error) {
 	mendPackageJSON()
 	defer mendPackageJSON()
 	mendDist(ctx, bun)
-	return bunCommand(ctx, bun, Dir(), args...).CombinedOutput()
+	out, err := bunCommand(ctx, bun, Dir(), args...).CombinedOutput()
+	// a dependency no plugin is installed as that Bun couldn't install
+	// fails every command: taken out, and the command run again
+	if err != nil && len(dropBroken(&bunRunError{err, string(out)})) > 0 {
+		out, err = bunCommand(ctx, bun, Dir(), args...).CombinedOutput()
+	}
+	return out, err
 }
 
 // mendPackageJSON cuts what follows plugins/package.json's object off. Bun
@@ -265,7 +284,7 @@ func save(l List) error {
 		return err
 	}
 	listSeen.Lock()
-	listSeen.stamp, listSeen.set = listStamp(), true
+	listSeen.stamp, listSeen.set = seenStamp(), true
 	listSeen.Unlock()
 	return nil
 }
@@ -297,11 +316,12 @@ func listStamp() string {
 // running has the old ones loaded.
 var hostStale atomic.Bool
 
-// checkList notices plugins.json changed by another magpie: the host is
-// started again with the plugins as they are, and the providers the other
-// magpie last saw asked for are the ones known meanwhile.
+// checkList notices plugins.json changed by another magpie, or a plugin
+// added by its path edited (pathstamp.go): the host is started again with
+// the plugins as they are, and the providers the other magpie last saw
+// asked for are the ones known meanwhile.
 func checkList() {
-	st := listStamp()
+	st := seenStamp()
 	listSeen.Lock()
 	moved := listSeen.set && listSeen.stamp != st
 	listSeen.stamp, listSeen.set = st, true
@@ -325,15 +345,15 @@ func IsPath(spec string) bool {
 	return strings.HasPrefix(spec, "file://") || strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.HasPrefix(spec, `\`) || filepath.IsAbs(spec) || driveRooted.MatchString(spec)
 }
 
-var driveRooted = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
+var driveRooted = lazyre.New(`^[A-Za-z]:[\\/]`)
 
-var pkgName = regexp.MustCompile(`^(@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*$`)
+var pkgName = lazyre.New(`^(@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*$`)
 
 // gitSpec is a package bun fetches from a git repository, not npm:
 // github:owner/repo[#ref] (gitlab: and bitbucket: alike), a git+https://,
 // git+ssh://, git+file:// or git:// URL, a GitHub, GitLab or Bitbucket
 // page's URL, or owner/repo, GitHub's shorthand.
-var gitSpec = regexp.MustCompile(`^(?:(?:github|gitlab|bitbucket):|git\+[a-z]+://|git://)\S+$|^https?://(?:www\.)?(?:github\.com|gitlab\.com|bitbucket\.org)/\S+$|^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+(?:#\S+)?$`)
+var gitSpec = lazyre.New(`^(?:(?:github|gitlab|bitbucket):|git\+[a-z]+://|git://)\S+$|^https?://(?:www\.)?(?:github\.com|gitlab\.com|bitbucket\.org)/\S+$|^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]+(?:#\S+)?$`)
 
 // IsGit is whether spec names a git repository rather than an npm package
 // or a path. The package bun installs from it is named by its own
@@ -401,6 +421,9 @@ func Add(ctx context.Context, spec string) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
+	if err := RefuseWithdrawn(ctx, spec); err != nil {
+		return Entry{}, err
+	}
 	return add(ctx, spec, "")
 }
 
@@ -415,6 +438,7 @@ func add(ctx context.Context, spec, version string) (Entry, error) {
 	if spec == "" {
 		return Entry{}, errors.New("no plugin given")
 	}
+	defer beingAdded(spec)()
 	// the package each plugin is before the install, which may take a git
 	// one's name over (one repository in place of another, or of npm's)
 	was := map[string]string{}
@@ -453,16 +477,24 @@ func add(ctx context.Context, spec, version string) (Entry, error) {
 		// installed just now for this, and nothing loads it: taken out again
 		if !IsPath(spec) && !slices.Contains(slices.Collect(maps.Values(was)), Name(spec)) {
 			if bun, berr := Bun(ctx); berr == nil {
-				_, _ = runBun(ctx, bun, "remove", "--ignore-scripts", Name(spec))
+				_ = removeDep(ctx, bun, Name(spec))
 			}
 		}
 		return Entry{}, err
 	}
 	if err := ensurePi(ctx, Target(spec)); err != nil {
+		// nothing loads it without pi's agent: taken out again, as above
+		if !IsPath(spec) && !slices.Contains(slices.Collect(maps.Values(was)), Name(spec)) {
+			if bun, berr := Bun(ctx); berr == nil {
+				_ = removeDep(ctx, bun, Name(spec))
+			}
+		}
 		return Entry{}, err
 	}
+	listFileMu.Lock()
 	listMu.Lock()
 	defer listMu.Unlock()
+	defer listFileMu.Unlock()
 	l := Load()
 	e := Entry{Spec: spec}
 	name := Name(spec)
@@ -606,11 +638,13 @@ func indexOf(l List, name string) int {
 
 // Remove takes a plugin off the list (and out of plugins/).
 func Remove(ctx context.Context, name string) error {
+	listFileMu.Lock()
 	listMu.Lock()
 	l := Load()
 	i := indexOf(l, name)
 	if i < 0 {
 		listMu.Unlock()
+		listFileMu.Unlock()
 		return fmt.Errorf("no plugin %q", name)
 	}
 	e := l.Plugins[i]
@@ -618,12 +652,15 @@ func Remove(ctx context.Context, name string) error {
 	maps.DeleteFunc(l.Prefer, func(_, s string) bool { return s == e.Spec })
 	err := save(l)
 	listMu.Unlock()
+	listFileMu.Unlock()
 	if err != nil {
 		return err
 	}
 	if !IsPath(e.Spec) {
-		if bun, err := Bun(ctx); err == nil {
-			_, _ = runBun(ctx, bun, "remove", "--ignore-scripts", Name(e.Spec))
+		// another entry of the same package (a folder's spec aside) still
+		// needs it
+		if bun, err := Bun(ctx); err == nil && !slices.ContainsFunc(l.Plugins, func(x Entry) bool { return !IsPath(x.Spec) && Name(x.Spec) == Name(e.Spec) }) {
+			_ = removeDep(ctx, bun, Name(e.Spec))
 		}
 	}
 	Restart()
@@ -632,8 +669,10 @@ func Remove(ctx context.Context, name string) error {
 
 // SetOff turns a plugin off or back on.
 func SetOff(name string, off bool) error {
+	listFileMu.Lock()
 	listMu.Lock()
 	defer listMu.Unlock()
+	defer listFileMu.Unlock()
 	l := Load()
 	i := indexOf(l, name)
 	if i < 0 {
@@ -653,8 +692,10 @@ func SetOff(name string, off bool) error {
 // with it; one switched off leaves the id to the others until it is on
 // again.
 func Prefer(name, id string) error {
+	listFileMu.Lock()
 	listMu.Lock()
 	defer listMu.Unlock()
+	defer listFileMu.Unlock()
 	l := Load()
 	i := indexOf(l, name)
 	if i < 0 {
@@ -677,8 +718,10 @@ func Prefer(name, id string) error {
 // SetOptions sets the options a plugin is handed (a middleware's
 // ctx.options); nil takes them away.
 func SetOptions(name string, opts map[string]any) error {
+	listFileMu.Lock()
 	listMu.Lock()
 	defer listMu.Unlock()
+	defer listFileMu.Unlock()
 	l := Load()
 	i := indexOf(l, name)
 	if i < 0 {
@@ -766,6 +809,7 @@ func install(ctx context.Context, spec string) error {
 	// before (#2954)
 	_ = refreshGitCache(ctx, spec)
 	mendDist(ctx, bun)
+	before := depsNow()
 	err = bunAdd(ctx, bun, spec)
 	// a @magpie-community package or version npm doesn't have (a new
 	// one waits for an owner to publish it there) comes from the
@@ -773,22 +817,62 @@ func install(ctx context.Context, spec string) error {
 	// back stays held, as the user's bunfig asks, and a bun this machine
 	// can't run at all can't add it from there either
 	var ue *BunUnstartableError
+	// the version the add is for, when it names one: the dist branch's
+	// newest when it is added from there at "latest"
+	want := strings.TrimPrefix(strings.TrimPrefix(spec, Name(spec)), "@")
+	if IsPath(spec) || IsGit(spec) || !exactVersion.MatchString(want) {
+		want = ""
+	}
 	if name, version, ok := distWanted(spec); ok && err != nil && !minAge.MatchString(err.Error()) && !errors.As(err, &ue) {
-		if derr := installDist(ctx, bun, name, version); derr != nil {
-			return fmt.Errorf("%w (and from the community repo's dist branch: %v)", err, derr)
+		v, derr := installDist(ctx, bun, name, version)
+		if v != "" {
+			want = v
 		}
+		if derr != nil {
+			// both wrapped: what Bun said at either try is read (failedOf)
+			err = fmt.Errorf("%w (and from the community repo's dist branch: %w)", err, derr)
+		} else {
+			err = nil
+		}
+	}
+	// another plugin's package Bun couldn't install, and this one in: the
+	// add is done, and that plugin's row says what is wrong with it
+	// (never over a copy of its own that isn't whole: Bun said
+	// "installed" over it, and may have exited 0)
+	if err != nil && !errors.Is(err, errDistPartial) && othersFailed(err, spec, want) {
+		log.Printf("plugins: %s installed; Bun couldn't install %s: %v", spec, strings.Join(failedOf(err), ", "), err)
 		err = nil
 	}
-	if err == nil {
-		pruneDist()
-		pruneInstallCache()
+	if err != nil {
+		// nothing of a failed add stays: a dependency left in package.json
+		// is installed again at every bun command, and no plugin lists it
+		before.undo()
+		return err
+	}
+	pruneDist()
+	pruneInstallCache()
+	return nil
+}
+
+// bunAdd adds spec to plugins/ with bun, its scripts left unrun. keep
+// are more packages the add is for (a dist tarball's: its spec is a
+// path). installMu held.
+//
+// Bun writes the dependency into package.json before it installs, and
+// exits 1 with it there when any package fails, this one or another. One
+// no plugin is installed as (a failed add's, before that was put back)
+// failed every add after it: taken out, and the add tried again. Here, so
+// every add has it: the dist branch's too (CHENGJIAHEGOXIS on X, v0.1.4205:
+// GoAnyAPI, not on npm, failed from dist over agency-agents).
+func bunAdd(ctx context.Context, bun, spec string, keep ...string) error {
+	err := bunAddOnce(ctx, bun, spec)
+	if err != nil && len(dropBroken(err, append([]string{spec}, keep...)...)) > 0 {
+		err = bunAddOnce(ctx, bun, spec)
 	}
 	return err
 }
 
-// bunAdd adds spec to plugins/ with bun, its scripts left unrun.
-// installMu held.
-func bunAdd(ctx context.Context, bun, spec string) error {
+func bunAddOnce(ctx context.Context, bun, spec string) error {
 	out, err := bunCommand(ctx, bun, Dir(), "add", "--ignore-scripts", spec).CombinedOutput()
 	if err != nil {
 		if hint := missingLibs(string(out)); hint != "" {
@@ -797,7 +881,7 @@ func bunAdd(ctx context.Context, bun, spec string) error {
 		if ue := wontLoad(bun, err); ue != nil {
 			return fmt.Errorf("bun add %s: %w", spec, ue)
 		}
-		return fmt.Errorf("bun add %s: %v: %s", spec, cantStart(bun, err), lastLines(string(out), 6))
+		return &bunRunError{fmt.Errorf("bun add %s: %v: %s", spec, cantStart(bun, err), bunSaid(string(out), 6)), string(out)}
 	}
 	return nil
 }
@@ -839,7 +923,7 @@ func installAt(ctx context.Context, pkg, version string) error {
 }
 
 // minAge is bun's word for a version its minimumReleaseAge holds back.
-var minAge = regexp.MustCompile(`minimum-release-age: (\d+) seconds`)
+var minAge = lazyre.New(`minimum-release-age: (\d+) seconds`)
 
 // ageText is a number of seconds as a reader says it: 2 days, 12 hours.
 func ageText(secs string) string {
@@ -978,7 +1062,7 @@ func reinstall(ctx context.Context, spec string) error {
 		if ue := wontLoad(bun, err); ue != nil {
 			return fmt.Errorf("bun update %s: %w", name, ue)
 		}
-		return fmt.Errorf("bun update %s: %v: %s", name, cantStart(bun, err), lastLines(string(out), 6))
+		return fmt.Errorf("bun update %s: %v: %s", name, cantStart(bun, err), bunSaid(string(out), 6))
 	}
 	// what the checks saw the repository at (the page's, before the
 	// reader pressed update) is what the update was to install: bun
@@ -1000,6 +1084,37 @@ func reinstall(ctx context.Context, spec string) error {
 	return nil
 }
 
+// bunSaid is what a failed bun command said, for its error: every line
+// that says what failed, and its last n lines. Its last lines alone hid
+// it: Bun names the package it couldn't install before "Saved lockfile",
+// the added package and its summary, so "Failed to install 1 package"
+// came with no word of which (CHENGJIAHEGOXIS on X, v0.1.4210). Blank
+// lines are left out.
+func bunSaid(s string, n int) string {
+	s = ansi.ReplaceAllString(strings.ReplaceAll(s, "\r\n", "\n"), "")
+	var ls []string
+	for _, l := range strings.Split(s, "\n") {
+		if l = strings.TrimRight(l, " \t\r"); strings.TrimSpace(l) != "" {
+			ls = append(ls, l)
+		}
+	}
+	var out []string
+	said := 0
+	for i, l := range ls {
+		switch {
+		case i >= len(ls)-n:
+			out = append(out, l)
+		case said < 8 && bunFailLine.MatchString(l):
+			out = append(out, l)
+			said++
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// bunFailLine is a line of Bun's output that says something failed.
+var bunFailLine = lazyre.New(`(?i)\b(?:error|failed|unexpected|refusing|permission denied)\b|^E[A-Z]{2,}\b`)
+
 func lastLines(s string, n int) string {
 	ls := strings.Split(strings.TrimSpace(s), "\n")
 	if len(ls) > n {
@@ -1014,6 +1129,11 @@ func command(ctx context.Context, name string, args ...string) *exec.Cmd {
 
 // env is the plugins' environment: magpie's, with its proxy.
 func env() []string { return netproxy.Env(os.Environ()) }
+
+// dlEnv is env for a program that downloads plugins (bun add, update and
+// remove, git): plugin downloads' proxy where Settings sets one
+// (netproxy.EnvDownloads), never the one a plugin's requests take.
+func dlEnv() []string { return netproxy.EnvDownloads(os.Environ()) }
 
 // Version is the version of the package spec installed (or checked out
 // at its path), "" when there is none.

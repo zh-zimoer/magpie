@@ -6,6 +6,7 @@ package usage
 
 import (
 	"encoding/csv"
+	"github.com/yetone/magpie/internal/dayzone"
 	"io"
 	"slices"
 	"sort"
@@ -100,10 +101,12 @@ type Filter struct {
 	// Account narrows to the calls a subscription account answered, by its
 	// name as Record.Account gives it (#557)
 	Account string
-	// Failed keeps the rows of the requests the agent got an error for
-	// (Record.LostRequest), Retried those of the requests answered after a
-	// try that failed first (Record.RetriedRequest): what the Requests
-	// card's two counts are of
+	// Failed keeps the rows of every request a try failed on
+	// (Record.FailedTry): those the agent got an error for, the tries
+	// handed on, and the requests a later try answered, as Routing shows
+	// them failed (maohy915 on X). Retried keeps only the requests answered
+	// after a try that failed first (Record.RetriedRequest). The Requests
+	// card still counts each request once, by how it ended.
 	Failed  bool
 	Retried bool
 	Query   string
@@ -183,6 +186,15 @@ func (f Filter) keeps(r Record) bool {
 	return f.keepsRecord(&r, false, "", "")
 }
 
+// sameGroupModel is whether a record's model is the found routing group
+// a filter names by its kept id (group/auto-…, FilterOf), written by an
+// agent's own session file as auto/<model>. Only such pairs read the
+// providers, not every record a filter passes over.
+func sameGroupModel(recorded, filtered string) bool {
+	return strings.HasPrefix(filtered, provider.GroupPrefix) && strings.HasPrefix(recorded, provider.AutoPrefix) &&
+		provider.CanonicalRef(recorded) == filtered
+}
+
 func (f Filter) keepsRecord(r *Record, codexIdentity bool, subagent, parentAgent string) bool {
 	if f.Day != "" {
 		var day [len(time.DateOnly)]byte
@@ -196,7 +208,7 @@ func (f Filter) keepsRecord(r *Record, codexIdentity bool, subagent, parentAgent
 	if f.RouteID != 0 && r.RouteID != f.RouteID {
 		return false
 	}
-	if f.Model != "" && r.Model != f.Model {
+	if f.Model != "" && r.Model != f.Model && !sameGroupModel(r.Model, f.Model) {
 		return false
 	}
 	if f.Agent != "" && ReportedAs(r.Agent) != f.Agent {
@@ -214,7 +226,7 @@ func (f Filter) keepsRecord(r *Record, codexIdentity bool, subagent, parentAgent
 	if !f.computer(r) {
 		return false
 	}
-	if f.Failed && !r.LostRequest() {
+	if f.Failed && !r.FailedTry() {
 		return false
 	}
 	if f.Retried && !r.RetriedRequest() {
@@ -233,8 +245,8 @@ func (f Filter) keepsRecord(r *Record, codexIdentity bool, subagent, parentAgent
 
 // Since is when the period began, as of now; zero for all.
 func (p Period) Since(now time.Time) time.Time {
-	if first, _, ok := p.days(now.Location()); ok {
-		return first
+	if since, _, ok := p.bounds(now.Location()); ok {
+		return since
 	}
 	// a rolling window ends now, so it began that long ago (#2075)
 	if d := p.Last(); d > 0 {
@@ -389,7 +401,8 @@ const UnknownProvider = "session-unknown"
 func logRecord(c sessions.Call) Record {
 	r := Record{Time: c.Time, Agent: c.Agent, Provider: UnknownProvider, Model: c.Model, Served: c.Model, Requested: c.Requested,
 		Input: c.Input, Output: c.Output, CacheRead: c.CacheRead, CacheWrite: c.CacheWrite, CacheWrite1h: c.CacheWrite1h, Reasoning: c.Reasoning, Effort: c.Effort,
-		Millis: c.Millis, TTFT: c.TTFT, Session: c.Session, RequestID: c.RequestID, Error: c.ErrorText, ErrType: c.Error, Subagent: sessions.SubagentOf(c.File), ParentAgent: sessions.SubagentParent(c.File)}
+		Millis: c.Millis, TTFT: c.TTFT, Session: c.Session, RequestID: c.RequestID, MessageID: c.Msg, Error: c.ErrorText, ErrType: c.Error, Subagent: sessions.SubagentOf(c.File), ParentAgent: sessions.SubagentParent(c.File),
+		Credits: c.Credits}
 	if c.Agent == "codex" {
 		r.ResponseID = c.ResponseID
 		r.Compaction = codexCompactionOf(c)
@@ -451,6 +464,7 @@ func ledgerWith(since time.Time, f Filter, recs []Record, logs []sessions.Call) 
 // priced and judged here as this computer's are, and none from until on (a
 // picked range's end, #1492; zero for none).
 func ledgerWithShared(since, until time.Time, f Filter, recs []Record, logs []sessions.Call, others []SharedCall) (rows []Row, sum Totals, agents, providers []string) {
+	logs = ownCalls(logs)
 	matched, pairs, actors, compactions := gatewayMatchesDetails(recs, logs)
 	return ledgerMatched(since, until, f, recs, logs, others, matched, pairs, actors, compactions)
 }
@@ -572,7 +586,7 @@ var ownPrice catalog.Price
 // one whose other models alone would stand for this call's, prices
 // nothing (#4278).
 func Pricer() func(Record) *catalog.Price {
-	prices := map[[5]string]*catalog.Price{}
+	prices := map[[7]string]*catalog.Price{}
 	// each provider's rate windows as the same read of the prices saw
 	// them: the windows are held once (BasePriceIn), each record's rate
 	// read at its own time (provider.RateAt), so a window that opens
@@ -589,59 +603,130 @@ func Pricer() func(Record) *catalog.Price {
 			served = ""
 		}
 		id := r.priceID()
-		k := [5]string{id, r.Model, served, r.SessionProvider, r.Effort}
+		// a key that bills at its own rate (provider.KeyPriceRates) prices
+		// its calls apart from the provider's other keys
+		key := r.ProviderKeyID
+		tier := r.billedTier()
+		k := [7]string{id, r.Model, served, r.SessionProvider, r.Effort, key, tier}
 		if pr, ok := prices[k]; ok {
 			return atWindow(pr, windows[id], r.Time)
 		}
-		var pr *catalog.Price
-		var v catalog.Price
-		var ws []provider.RateWindow
-		var ok bool
-		// the swap the ledger marks: the reply named another model than
-		// asked, no rename of it (#5340)
-		if servedInstead(wires, id, r.Model, r.Effort, served) {
-			// a price the user set for the model asked for still says what
-			// that model costs them, a zero included
-			if v, ok, ws = provider.UserBasePriceIn(s, id, r.Model); !ok {
-				// the model that ran is priced as itself, what the vendor
-				// billed; with none, the asked-for one's price stands
-				if v, ok, ws = provider.BasePriceIn(s, id, served); !ok {
-					v, ok, ws = provider.BasePriceIn(s, id, r.Model)
-				}
-			}
-		} else {
-			v, ok, ws = provider.BasePriceIn(s, id, r.Model)
-		}
-		if !ok && served != "" {
-			v, ok, ws = provider.BasePriceIn(s, id, served)
-		}
-		if ok {
-			pr = &v
+		a := priceAsk{ID: id, Model: r.Model, Served: served, SessionProvider: r.SessionProvider, Effort: r.Effort, Key: key, Unknown: r.Provider == UnknownProvider}
+		pr, ws := basePriceIn(s, wires, a)
+		noteAsk(a.ask(), priceAnswer(pr, ws))
+		if pr != nil {
 			windows[id] = ws
-		} else if r.Provider == UnknownProvider && r.SessionProvider != "" {
-			// A session file's usage entry names the provider the call went
-			// through (omp's model_usage: provider openrouter, model
-			// typesafe/jev-1.14, #4278), which its billing provider, the
-			// unknown one, never says. The name is the file's word for the
-			// route, not an account of ours, so it prices only what the
-			// catalog itself lists under it: this very model id, at that
-			// provider, at a price. A provider models.dev doesn't know, a
-			// model it lists that provider without, and a listing with no
-			// price are none: the row stays unpriced, its CSV cost empty,
-			// rather than priced at another entry's guess.
-			if v, ok := catalog.PriceOf(r.SessionProvider, r.Model); ok {
-				pr = &v
-				// the failed lookup's windows are the billing provider's,
-				// not the session provider's: none holds for this price
-				ws = nil
-			}
 		}
 		if pr == nil {
 			catalog.Missing() // models.dev may list it by now
+		} else {
+			// Fast and Ultrafast bill at more than the standard price
+			// (Archivemylife on X: a Fast call read at the standard one)
+			pr = tierPriced(pr, tier, served, r.Model)
 		}
 		prices[k] = pr
 		return atWindow(pr, ws, r.Time)
 	}
+}
+
+// tierPriced is pr at a call's service tier: the price its maker lists
+// for the tier when pr is that model's standard price, the model that ran
+// or the one asked for (catalog.TierPrice), else pr. The rows hold the
+// tier's price, so the question is noted: a catalog that prices the tier
+// otherwise names the request index anew.
+func tierPriced(pr *catalog.Price, tier string, models ...string) *catalog.Price {
+	if pr == nil || tier == "" {
+		return pr
+	}
+	std := priceAnswer(pr, nil)
+	for _, model := range models {
+		if model == "" {
+			continue
+		}
+		tp, ok := catalog.TierPrice(*pr, model, tier)
+		answer := ""
+		if ok {
+			answer = priceAnswer(&tp, nil)
+		}
+		noteAsk(strings.Join([]string{"t", model, tier, std}, askSep), answer)
+		if ok {
+			return &tp
+		}
+	}
+	return pr
+}
+
+// billedTier is the service tier a record's call is priced at: the one
+// its reply named, as OpenAI's API bills it (a priority request it ran at
+// "default" is billed at the default), else the one sent: the ChatGPT
+// backend's reply names none that tells (servedTierAt keeps it ""). ""
+// for the standard tier.
+func (r Record) billedTier() string {
+	tier := strings.ToLower(strings.TrimSpace(r.TierServed))
+	if tier == "" || tier == "auto" {
+		tier = strings.ToLower(strings.TrimSpace(r.TierSent))
+	}
+	switch tier {
+	case "", "default", "auto", "standard":
+		return ""
+	}
+	return tier
+}
+
+// priceAsk is what Pricer prices a record by, less its time: the base
+// price and rate windows answer it, and every record that asks the same
+// is priced the same.
+type priceAsk struct {
+	ID, Model, Served, SessionProvider, Effort, Key string
+	Unknown                                         bool
+}
+
+// basePriceIn is a's price before its time's rate window, and the
+// provider's windows, as Pricer finds it: nil when none is known.
+func basePriceIn(s settings.Settings, wires map[string]string, a priceAsk) (*catalog.Price, []provider.RateWindow) {
+	var pr *catalog.Price
+	var v catalog.Price
+	var ws []provider.RateWindow
+	var ok bool
+	// the swap the ledger marks: the reply named another model than
+	// asked, no rename of it (#5340)
+	if servedInstead(wires, a.ID, a.Model, a.Effort, a.Served) {
+		// a price the user set for the model asked for still says what
+		// that model costs them, a zero included
+		if v, ok, ws = provider.UserBasePriceIn(s, a.ID, a.Model); !ok {
+			// the model that ran is priced as itself, what the vendor
+			// billed; with none, the asked-for one's price stands
+			if v, ok, ws = provider.BaseKeyPriceIn(s, a.ID, a.Key, a.Served); !ok {
+				v, ok, ws = provider.BaseKeyPriceIn(s, a.ID, a.Key, a.Model)
+			}
+		}
+	} else {
+		v, ok, ws = provider.BaseKeyPriceIn(s, a.ID, a.Key, a.Model)
+	}
+	if !ok && a.Served != "" {
+		v, ok, ws = provider.BaseKeyPriceIn(s, a.ID, a.Key, a.Served)
+	}
+	if ok {
+		pr = &v
+	} else if a.Unknown && a.SessionProvider != "" {
+		// A session file's usage entry names the provider the call went
+		// through (omp's model_usage: provider openrouter, model
+		// typesafe/jev-1.14, #4278), which its billing provider, the
+		// unknown one, never says. The name is the file's word for the
+		// route, not an account of ours, so it prices only what the
+		// catalog itself lists under it: this very model id, at that
+		// provider, at a price. A provider models.dev doesn't know, a
+		// model it lists that provider without, and a listing with no
+		// price are none: the row stays unpriced, its CSV cost empty,
+		// rather than priced at another entry's guess.
+		if v, ok := catalog.PriceOf(a.SessionProvider, a.Model); ok {
+			pr = &v
+			// the failed lookup's windows are the billing provider's,
+			// not the session provider's: none holds for this price
+			ws = nil
+		}
+	}
+	return pr, ws
 }
 
 // servedInstead reports whether the vendor answered a call on model with
@@ -752,7 +837,7 @@ func WriteCSV(w io.Writer, rows []Row) error {
 func timeline(p Period, now, first time.Time) (since time.Time, bucket string, pts []Point) {
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	bucket, pts = "day", []Point{}
-	var n int
+	var n, hours int
 	// a rolling window ends now: an hour each of two days or less, else a
 	// day each from when it began (#2075)
 	if d := p.Last(); d > 0 {
@@ -761,7 +846,7 @@ func timeline(p Period, now, first time.Time) (since time.Time, bucket string, p
 			bucket = "hour"
 			for h := 0; h <= int(d.Hours()); h++ {
 				t := since.Add(time.Duration(h) * time.Hour)
-				pts = append(pts, Point{Label: t.Format("15"), Time: t})
+				pts = append(pts, Point{Label: hourLabel(t), Time: t})
 			}
 		} else {
 			n = int(d.Hours())/24 + 1
@@ -772,11 +857,22 @@ func timeline(p Period, now, first time.Time) (since time.Time, bucket string, p
 		}
 		return since, bucket, pts
 	}
-	if first, last, ok := p.days(now.Location()); ok {
+	if first, until, ok := p.bounds(now.Location()); ok {
 		// a picked range: an hour each of a single day, else a day each,
-		// a week each (from a Monday) past 60 days as All has
+		// a week each (from a Monday) past 60 days as All has. One that
+		// names its minutes is an hour each from the hour it begins in,
+		// up to two days of them, else a day each from its first day.
+		last := until.Add(-time.Nanosecond)
 		since, n = first, calendarDays(first, last)+1
-		if n == 1 {
+		if p.timed() {
+			hour := time.Date(first.Year(), first.Month(), first.Day(), first.Hour(), 0, 0, 0, first.Location())
+			if h := int((until.Sub(hour) + time.Hour - 1) / time.Hour); h <= 48 {
+				since, bucket, hours = hour, "hour", h
+			} else {
+				since = time.Date(first.Year(), first.Month(), first.Day(), 0, 0, 0, 0, first.Location())
+			}
+		}
+		if n == 1 && !p.timed() {
 			bucket = "hour"
 		} else if n > 60 {
 			bucket = "week"
@@ -810,9 +906,13 @@ func timeline(p Period, now, first time.Time) (since time.Time, bucket string, p
 	}
 	switch bucket {
 	case "hour":
-		for h := 0; since.Add(time.Duration(h) * time.Hour).Before(since.AddDate(0, 0, 1)); h++ {
+		end := since.AddDate(0, 0, 1)
+		if hours > 0 {
+			end = since.Add(time.Duration(hours) * time.Hour)
+		}
+		for h := 0; since.Add(time.Duration(h) * time.Hour).Before(end); h++ {
 			t := since.Add(time.Duration(h) * time.Hour)
-			pts = append(pts, Point{Label: t.Format("15"), Time: t})
+			pts = append(pts, Point{Label: hourLabel(t), Time: t})
 		}
 	case "day":
 		for i := 0; i < n; i++ {
@@ -906,9 +1006,7 @@ func (t *Totals) plus(d *Totals) {
 	t.FloorOut += d.FloorOut
 	t.FloorMs += d.FloorMs
 	t.FloorN += d.FloorN
-	t.UpBytes += d.UpBytes
-	t.DownBytes += d.DownBytes
-	t.ImageFilesSaved += d.ImageFilesSaved
+	t.plusBytes(d)
 }
 
 // FloorAgents are the agents whose session files time a call from what
@@ -1062,16 +1160,36 @@ func (r *Row) key(by string) string {
 // keyer is Row.key for many rows, made once for each provider and model:
 // a "modelAt" is a string built of two, which a page of thousands of rows
 // would otherwise build again for each.
-type keyer map[[2]string]string
+type keyer struct {
+	public func(string) string
+	models map[string]string
+	at     map[[2]string]string
+}
+
+func newKeyer() keyer {
+	return keyer{public: provider.PublicRefs(), models: map[string]string{}, at: map[[2]string]string{}}
+}
 
 func (m keyer) key(r *Row, by string) string {
-	if by != "modelAt" {
+	if by != "modelAt" && by != "model" {
 		return r.key(by)
 	}
-	k, ok := m[[2]string{r.Provider, r.Model}]
+	model := r.Model
+	if m.public != nil {
+		var ok bool
+		model, ok = m.models[r.Model]
+		if !ok {
+			model = m.public(r.Model)
+			m.models[r.Model] = model
+		}
+	}
+	if by == "model" {
+		return model
+	}
+	k, ok := m.at[[2]string{r.Provider, r.Model}]
 	if !ok {
-		k = r.key(by)
-		m[[2]string{r.Provider, r.Model}] = k
+		k = ModelAtKey(r.Provider, model)
+		m.at[[2]string{r.Provider, r.Model}] = k
 	}
 	return k
 }
@@ -1090,7 +1208,7 @@ type Share struct {
 func Breakdown(rows []Row, by string) []Share {
 	at := map[string]*Share{}
 	var out []*Share
-	keys := keyer{}
+	keys := newKeyer()
 	for _, r := range rows {
 		if r.IsRejected() {
 			continue
@@ -1130,6 +1248,10 @@ type Part struct {
 	TTFT      int64 `json:"ttft_ms,omitempty"`
 	DecodeMs  int64 `json:"decode_ms,omitempty"`
 	DecodeOut int   `json:"decode_out,omitempty"`
+	// the bytes its requests sent up and read back (Totals.UpBytes), for
+	// a chart of the traffic over time
+	UpBytes   int64 `json:"up_bytes,omitempty"`
+	DownBytes int64 `json:"down_bytes,omitempty"`
 }
 
 // add counts a row in the part.
@@ -1141,6 +1263,8 @@ func (p *Part) add(r Row) {
 	if r.Priced {
 		p.Cost += r.Cost
 	}
+	p.UpBytes += int64(r.UpBytes)
+	p.DownBytes += int64(r.DownBytes)
 	if r.TTFT > 0 && r.Answered() {
 		p.Timed++
 		p.TTFT += r.TTFT
@@ -1161,6 +1285,8 @@ func (p *Part) plus(d *Totals) {
 	p.TTFT += d.TTFT
 	p.DecodeMs += d.DecodeMs
 	p.DecodeOut += d.DecodeOut
+	p.UpBytes += d.UpBytes
+	p.DownBytes += d.DownBytes
 }
 
 // SeriesPoint is a point of the timeline with its calls told apart, by each
@@ -1179,7 +1305,7 @@ const seriesKeep = 24
 // hour, day or week, for the chart over them. A row is of the point its
 // time falls in; the rows are in any order.
 func LedgerSeries(p Period, rows []Row) (bucket string, pts []SeriesPoint) {
-	return ledgerSeriesAt(p, rows, Clock())
+	return ledgerSeriesAt(p, rows, localNow())
 }
 
 // ledgerSeriesAt is LedgerSeries with the period read at now, the moment the
@@ -1203,7 +1329,7 @@ func ledgerSeriesAt(p Period, rows []Row, now time.Time) (bucket string, pts []S
 		}
 	}
 	kept := map[string]map[string]bool{}
-	keys := keyer{}
+	keys := newKeyer()
 	for _, d := range Dimensions {
 		kept[d] = map[string]bool{}
 		for i, s := range Breakdown(rows, d) {
@@ -1260,4 +1386,10 @@ func NewCoster() func(Record) (float64, bool) {
 		t.add(r, priceOf(r))
 		return t.Cost, t.Unpriced == 0
 	}
+}
+
+// hourLabel is the hour of the real day a point stands for: in a zone whose
+// day starts later (dayzone), its clock is that many hours behind.
+func hourLabel(t time.Time) string {
+	return t.Add(dayzone.Offset(t.Location())).Format("15")
 }

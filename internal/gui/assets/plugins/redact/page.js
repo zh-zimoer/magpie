@@ -59,7 +59,7 @@ function maskLoad(force) {
   maskBusyDays = days;
   const p = maskBusy = api("masking/summary?days=" + days).then((sum) => {
     if (days !== maskDays) return;
-    maskSum = { days: [], kinds: [], agents: [], providers: [], values: [], by: {}, n: 0, distinct: 0, requests: 0, ...(sum || {}) };
+    maskSum = { days: [], kinds: [], agents: [], providers: [], values: [], checked: [], by: {}, n: 0, distinct: 0, requests: 0, ...(sum || {}) };
     maskSumDays = days;
     maskAt = Date.now();
   }).catch(() => {}).finally(() => { if (maskBusy === p) maskBusy = null; });
@@ -90,7 +90,6 @@ function maskPageOpen() {
 }
 function maskPageLoad(force) {
   maskDrawAll();
-  (prefs ? Promise.resolve() : loadSettings()).then(drawMaskAlert).catch(() => {});
   const sum = maskLoad(force)?.then(() => { drawMaskCard(); drawMaskList(); });
   const recs = maskL.read && force ? maskRefresh() : maskL.read ? null : maskFetch();
   return Promise.all([sum, recs]);
@@ -99,15 +98,6 @@ function maskDrawAll() {
   drawMaskCard();
   drawMaskList();
   if (maskO) drawMaskOne();
-}
-// the Masking alert (Must2333 on X): a notification when a value is
-// masked for the first time, off until turned on. Gateway mode leaves it
-// out, as it does the other alerts its desktop would show
-function drawMaskAlert() {
-  const s = prefs || {};
-  $("#maskPrefs").hidden = gatewayMode;
-  $("#maskAlertSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.maskAlert ? "on" : "off",
-    (v) => savePrefs({ ...prefsKeep(s), maskAlert: v === "on" }).then(drawMaskAlert)));
 }
 // while the page is on screen it keeps up with requests as they go
 setInterval(() => {
@@ -143,7 +133,16 @@ function drawMaskCard() {
     b.type = "button";
     b.onclick = maskTurnOn;
     head.append(b);
-  } else head.append(maskOffButton());
+  } else {
+    // back to its settings (netube99 on X), unless Turn off goes there
+    if (!maskSettings().redactWords?.length) {
+      const set = el("button", "link", t("Settings") + " › " + $("#setTab-privacy").textContent);
+      set.type = "button";
+      set.onclick = (e) => openSettingsAt(e, "privacy", "#redactList .row");
+      head.append(set);
+    }
+    head.append(maskOffButton());
+  }
   if (sum?.requests || maskDays === 30) head.append(segs([["7", t("7 days")], ["30", t("30 days")]], String(maskDays), (v) => {
     maskDays = +v;
     try { localStorage.setItem("magpie.maskDays", v); } catch {}
@@ -174,6 +173,7 @@ function drawMaskCard() {
   if (move && sum.n) maskCountUp(num, sum.n);
   if (sum.agents.length && sum.providers.length) band.append(maskFlow(sum, move));
   else band.append(maskNone());
+  if (sum.checked?.length) box.append(maskChecked(sum));
   if (move) for (const [i, n] of [...band.children].entries()) n.animate([{ opacity: 0, transform: "translateY(6px)", filter: "blur(6px)" }, {}], { duration: 900, delay: i * 120, easing: "cubic-bezier(.2, .7, .1, 1)", fill: "backwards" });
 }
 
@@ -210,6 +210,31 @@ function maskNone() {
   link.onclick = (e) => openSettingsAt(e, "privacy");
   box.append(" ", link);
   return box;
+}
+// maskChecked: each agent's requests masking looked over before they
+// left, something masked in them or not, and those sent as written to a
+// model set to go unmasked. A request with nothing to mask has no record,
+// so without it an agent read the same here as one never masked
+// (eiyuuzaki2333 on X: Pi's calls on the Gateway page, only dsh's here)
+function maskChecked(sum) {
+  const row = el("div", "msk-checked");
+  for (const c of sum.checked.slice(0, 8)) {
+    const other = c.name === "other", who = other ? { name: t("Other") } : maskWho(c.name, "agent");
+    const b = el("button", "mo-node" + (maskL.agent === c.name ? " on" : ""));
+    b.type = "button";
+    b.dataset.agent = c.name;
+    const says = [];
+    if (c.looked) says.push(t("{n} checked", { n: fmtN(c.looked) }), c.masked ? t("{n} masked", { n: fmtN(c.masked) }) : t("none to mask"));
+    if (c.whole) says.push(t("{n} sent as written", { n: fmtN(c.whole) }));
+    const tx = el("span", "tx");
+    tx.append(el("span", "nm", who.name), el("span", "ct", says.join(" · ")));
+    b.append(icon(who.icon || "generic"), tx);
+    // a request no agent was named for has no record of its own to show
+    if (other) b.disabled = true;
+    else b.onclick = () => maskNarrow({ agent: maskL.agent === c.name ? "" : c.name });
+    row.append(b);
+  }
+  return row;
 }
 // the way off, beside the way on (ZekeXiao on X: "脱敏好像只有一个打开
 // 开关，不能关？"). Both switches go off at once. Your own words mask with neither
@@ -472,7 +497,10 @@ function drawMaskList() {
       sessPick(b, all, maskL[key], opts, head, (v) => maskNarrow({ [key]: v || "" }));
       bar.append(b);
     };
-    pick("agent", "Every agent", "Agent", (sum?.agents || []).map((a) => ({ v: a.name, name: maskWho(a.name, "agent").name })));
+    // an agent masking looked over with nothing to mask has no record,
+    // and is in the list too
+    const agents = [...new Set([...(sum?.agents || []), ...(sum?.checked || [])].map((a) => a.name))].filter((n) => n && n !== "other");
+    pick("agent", "Every agent", "Agent", agents.map((n) => ({ v: n, name: maskWho(n, "agent").name })));
     pick("provider", "Every provider", "Provider", (sum?.providers || []).map((p) => ({ v: p.name, name: maskWho(p.name, "provider").name })));
   }
   box.append(bar);
@@ -551,7 +579,7 @@ async function maskClear() {
 function maskRequestList(box) {
   const filtered = maskL.facet || maskL.kind || maskL.agent || maskL.provider;
   if (maskL.error) return void box.append(el("div", "msk-none err", t(maskL.error)));
-  if (!maskL.records.length) return void box.append(el("div", "msk-none", maskL.busy || !maskL.read ? t("Loading…") : filtered ? t("Nothing masked matches these filters") : t("Nothing masked yet")));
+  if (!maskL.records.length) return void box.append(el("div", "msk-none", maskL.busy || !maskL.read ? t("Loading…") : maskNoneChecked() || (filtered ? t("Nothing masked matches these filters") : t("Nothing masked yet"))));
   let day = "", list = null;
   for (const r of maskL.records) {
     const d = new Date(r.t).toDateString();
@@ -565,6 +593,17 @@ function maskRequestList(box) {
     }
     list.append(maskRecordRow(r));
   }
+}
+// maskNoneChecked: with no record to list, the requests masking looked
+// over and found nothing in, for the agent picked or for all
+function maskNoneChecked() {
+  if (maskL.facet || maskL.kind || maskL.provider || maskSumDays !== maskDays) return "";
+  const cs = (maskSum?.checked || []).filter((c) => !maskL.agent || c.name === maskL.agent);
+  const n = cs.reduce((a, c) => a + c.looked, 0);
+  if (!n || cs.some((c) => c.masked)) return "";
+  if (!maskL.agent) return t(n === 1 ? "1 request checked, and it carried nothing to mask" : "{n} requests checked, and none carried anything to mask", { n: fmtN(n) });
+  const name = maskWho(maskL.agent, "agent").name;
+  return t(n === 1 ? "1 request from {name} checked, and it carried nothing to mask" : "{n} requests from {name} checked, and none carried anything to mask", { n: fmtN(n), name });
 }
 // who to whom, an icon where there is one
 function maskRoute(into, r) {
@@ -638,7 +677,7 @@ function maskOneOpen(key, r) {
   if (!key) return;
   maskTipOff();
   const o = maskO = { key, r: r || maskL.records.find((x) => x.key === key) || null, sent: undefined, leaves: null, vals: new Map(), view: "both", pick: "", open: new Set(), whole: new Set() };
-  $("#maskCard").hidden = $("#maskList").hidden = $("#maskDemo").hidden = $("#maskPrefs").hidden = true;
+  $("#maskCard").hidden = $("#maskList").hidden = $("#maskDemo").hidden = true;
   xqd?.wake();
   $("#maskOne").hidden = false;
   drawMaskOne();
@@ -668,7 +707,6 @@ function maskOneClose() {
   $("#maskOne").hidden = true;
   $("#maskOne").replaceChildren();
   $("#maskCard").hidden = $("#maskList").hidden = $("#maskDemo").hidden = false;
-  $("#maskPrefs").hidden = gatewayMode;
   xqd?.wake();
   drawMaskList();
 }
@@ -842,8 +880,10 @@ function maskActsOn(mark, x, o) {
 }
 // maskValueMenu: Copy puts the value itself on the clipboard; Never mask
 // adds it to Settings › Privacy's list of that name (/api/masking/allow,
-// the same list), so the next request sends it as written. A value of
-// the user's own Masked words, or one in the list already, can't be added.
+// the same list), so new messages send it as written while the ones sent
+// before stay masked and the vendor's cache of them still matches
+// (redact's allowkept.go, NicoleS76448271 on X). A value of the user's
+// own Masked words, or one in the list already, can't be added.
 function maskValueMenu(anchor, x, o) {
   const again = agentMenu?.anchor === anchor;
   closeAgentMenu();
@@ -858,7 +898,7 @@ function maskValueMenu(anchor, x, o) {
     { name: "Copy", icon: COPY_ICON, run: () => copy(v, "", null, t("Value copied")) },
     { name: "Never mask", icon: EYE, off: !!why, why, run: () => {
       writingPrefs(api("masking/allow", { p: x.p }))
-        .then((ns) => { prefs = ns; if (state) state.settings = ns; status(t("Sent as written from the next request on"), "ok"); })
+        .then((ns) => { prefs = ns; if (state) state.settings = ns; status(t("Sent as written in new messages; earlier ones stay masked, so the cache still holds"), "ok"); })
         .catch((e) => status(t(e.message), "err"));
     } },
   ]);

@@ -28,6 +28,7 @@ func TestMain(m *testing.M) {
 	// whether Codex's ChatGPT account is out of its allowance is asked of
 	// OpenAI; never from here
 	codexUsedUp = func() bool { return false }
+	codexSignInKept = func() bool { return false }
 	// a thread a Codex holds open is looked at again later, on its own
 	// goroutine, which would outlive its test; the tests about it set
 	// their own wait
@@ -41,6 +42,10 @@ func TestMain(m *testing.M) {
 	// Microsoft Store apps are read from the current user's AppX registry;
 	// never this machine's (a Windows box with the Codex app installed)
 	windowsStorePackages = func() []string { return nil }
+	// a distro found off the gateway tries Windows' other addresses as a
+	// WSL via (wslFindVia); never this machine's, which on a Windows box
+	// would each be waited on for 15s
+	wslViaCandidates = func() []string { return nil }
 	// nor what an installer registered there (DeepSeek Harness Desktop's
 	// folder, #2279)
 	windowsRegisteredApp = func(string) (string, string) { return "", "" }
@@ -51,6 +56,17 @@ func TestMain(m *testing.M) {
 	// refused every test that turns magpie on for each agent; the tests
 	// about it say their own
 	ombRunning = func() bool { return false }
+	// nor is an Avibe this machine runs reached: each home's Avibe runs
+	// in the test (runningAvibe), and the tests about Avibe serve their own
+	// (avibe_test.go)
+	avibeLive = runningAvibe
+	// nor a Kun runtime this machine runs: each home's Kun runs in the
+	// test (runningKun)
+	kunLive = runningKun
+	// nor which OpenCode this machine has: an OpenCode 2 on PATH turned
+	// every OpenCode test's file into OpenCode 2's words; the tests about
+	// it say their own (opencode_v2_test.go)
+	openCodeVersion = func() string { return "" }
 	// a desktop app's Restart never quits or opens one of this machine's
 	// (the Codex app, Claude Desktop, WorkBuddy the developer runs); the
 	// restart tests stand in for each step

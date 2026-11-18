@@ -113,6 +113,29 @@
      }
     }
    ]
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "Docs",
+     "item": "https://usemagpie.ai/docs/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "Use DeepSeek, Kimi, GLM or your Claude and ChatGPT subscription in OpenCode",
+     "item": "https://usemagpie.ai/docs/opencode-models"
+    }
+   ]
   }
  ]
 }
@@ -219,7 +242,7 @@ magpie opencode small deepseek/deepseek-v4-flash # its small_model</pre></div>
       <tr><td><code>provider.magpie.options.apiKey</code></td><td>The gateway’s key</td></tr>
       <tr><td><code>provider.magpie.models</code></td><td>Every model magpie lists for OpenCode</td></tr>
     </table></div>
-    <p>Each model carries its context window and output limit, so OpenCode knows when to compact; whether it takes images; its reasoning levels; and its price. magpie keeps the list up to date as you add providers and accounts. If the file also has the provider under <code>providers</code>, where OpenCode 2 keeps it, magpie writes it there as well. OpenCode in a WSL distro on Windows is set up the same way, in the distro’s <code>~/.config/opencode</code>.</p>
+    <p>Each model carries its context window and output limit, so OpenCode knows when to compact; whether it takes images; its reasoning levels; and its price. magpie keeps the list up to date as you add providers and accounts. With OpenCode 2 installed, magpie writes OpenCode 2’s own keys instead: the provider under <code>providers.magpie</code> and the small model as <code>agents.title.model</code>. OpenCode in a WSL distro on Windows is set up the same way, in the distro’s <code>~/.config/opencode</code>.</p>
 
     <h2 id="variants"><a class="anchor" href="#variants">Reasoning levels and cost</a></h2>
     <ul>
@@ -239,7 +262,9 @@ magpie visible opencode all               # every model again</pre></div>
     <div class="code"><span class="lang">Terminal</span><button class="copy" data-copy="ex-oc-back">Copy</button><pre id="ex-oc-back">magpie opencode default</pre></div>
     <p>It puts back the <code>model</code> and <code>small_model</code> OpenCode had before magpie, and takes the <code>magpie</code> provider out of the file.</p>
 
-    <p><b>By provider:</b> <a href="/docs/deepseek">DeepSeek</a> · <a href="/docs/kimi">Kimi and Kimi Code</a> · <a href="/docs/glm">GLM Coding Plan</a></p>
+    <p><b>By provider:</b> <a href="/docs/deepseek">DeepSeek</a> · <a href="/docs/kimi">Kimi and Kimi Code</a> · <a href="/docs/glm">GLM Coding Plan</a> · <a href="/docs/volcengine">Volcengine Ark</a> · <a href="/docs/tencent-cloud">Tencent Cloud</a> · <a href="/docs/baidu-qianfan">Baidu Qianfan</a> · <a href="/docs/siliconflow">SiliconFlow</a> · <a href="/docs/modelscope">ModelScope</a> · <a href="/docs/huaweicloud">Huawei Cloud MaaS</a> · <a href="/docs/xiaomi-mimo">Xiaomi MiMo</a> · <a href="/docs/stepfun">StepFun</a> · <a href="/docs/longcat">LongCat</a> · <a href="/docs/qwen">Qwen</a> · <a href="/docs/minimax">MiniMax</a> · <a href="/docs/anthropic">Anthropic</a> · <a href="/docs/openai">OpenAI</a> · <a href="/docs/gemini">Gemini</a> · <a href="/docs/grok">Grok</a> · <a href="/docs/mistral">Mistral</a> · <a href="/docs/openrouter">OpenRouter</a> · <a href="/docs/copilot">GitHub Copilot</a> · <a href="/docs/ollama">Ollama</a></p>
+
+    <p><a href="/docs/coding-plans">OpenCode Go and ClinePass in Claude Code, Codex and other agents</a></p>
 
     <h2 id="faq"><a class="anchor" href="#faq">FAQ</a></h2>
     <h3>How do I use DeepSeek in OpenCode?</h3>
@@ -255,7 +280,7 @@ magpie visible opencode all               # every model again</pre></div>
     <h3>How do I switch back to OpenCode’s own model?</h3>
     <p>Pick one of OpenCode’s own models on its row in magpie, or run <code>magpie opencode default</code>. It puts back the model and <code>small_model</code> you had and removes magpie’s provider.</p>
 
-    <p style="margin-top:48px">Other agents: <a href="/docs/claude-code-models">Models in Claude Code</a>, <a href="/docs/codex-models">Models in Codex</a>, <a href="/docs/gemini-cli-models">Models in Gemini CLI</a>. Stuck? Ask on <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>.</p>
+    <p style="margin-top:48px">Other agents: <a href="/docs/claude-code-models">Models in Claude Code</a>, <a href="/docs/codex-models">Models in Codex</a>, <a href="/docs/gemini-cli-models">Models in Gemini CLI</a>, <a href="/docs/openclaw">OpenClaw on any model</a>, <a href="/docs/openchamber">OpenChamber on any model</a>. Stuck? Ask on <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>.</p>
   </article>
 </main>
 

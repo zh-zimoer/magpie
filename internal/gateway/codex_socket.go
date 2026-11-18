@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
 	"sync"
@@ -133,17 +134,45 @@ func shunCodexSocket(host string, why string) {
 }
 
 // codexSocket sends a streamed turn to the ChatGPT backend over its
-// WebSocket, and every other request through next.
+// WebSocket, and one to a Responses provider whose Socket is set over
+// the same WebSocket at its Responses URL (#5781); every other request
+// goes through next.
 type codexSocket struct{ next http.RoundTripper }
 
 func (t codexSocket) RoundTrip(req *http.Request) (*http.Response, error) {
-	if codexSocketOff.Load() || req.Method != http.MethodPost || req.GetBody == nil ||
-		!provider.CodexTurnURL(req.URL) || codexShunned(req.URL.Host) {
+	if codexSocketOff.Load() || req.Method != http.MethodPost || req.GetBody == nil {
+		return t.next.RoundTrip(req)
+	}
+	turn, shun := provider.SocketTurn(req)
+	if !turn || (shun && codexShunned(req.URL.Host)) {
+		return t.next.RoundTrip(req)
+	}
+	res, err := t.overSocket(req, shun)
+	if res != nil && res.StatusCode == http.StatusOK && res.Header.Get("Content-Type") == "" &&
+		!provider.CodexTurnURL(req.URL) {
+		// what a Responses provider's stream is said to be over HTTP;
+		// chatgpt.com's turns go on as they always have
+		res.Header.Set("Content-Type", "text/event-stream")
+	}
+	return res, err
+}
+
+// overSocket is RoundTrip for a turn that may go over the socket; shun
+// says a refused handshake leaves the host to HTTP for a while.
+func (t codexSocket) overSocket(req *http.Request, shun bool) (*http.Response, error) {
+	overHTTP := false
+	toSocket(req.Context())
+	defer func() { sentOnSocket(req.Context(), !overHTTP) }()
+	viaHTTP := func() (*http.Response, error) {
+		if !overHTTP {
+			toHTTP(req.Context())
+		}
+		overHTTP = true
 		return t.next.RoundTrip(req)
 	}
 	body, ok := codexSocketMessage(req)
 	if !ok {
-		return t.next.RoundTrip(req)
+		return viaHTTP()
 	}
 	msg := codexCreate(body)
 	var shape *codexTurnShape
@@ -170,11 +199,11 @@ func (t codexSocket) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 	if codexMessageTooBig(req.URL.Host, len(msg)) {
-		return t.next.RoundTrip(req)
+		return viaHTTP()
 	}
-	res, err := t.socket(req, msg, key, shape)
+	res, err := t.socket(req, msg, key, shape, shun)
 	if errors.Is(err, errCodexSocketFallBack) {
-		return t.next.RoundTrip(req)
+		return viaHTTP()
 	}
 	return res, err
 }
@@ -243,6 +272,28 @@ func codexCreate(body []byte) []byte {
 	return append(out, rest...)
 }
 
+// withoutClientMetadata is body with key gone from its client_metadata,
+// every other byte as it was, and body itself when it has no such key.
+func withoutClientMetadata(body []byte, key string) []byte {
+	cm := gjson.GetBytes(body, "client_metadata")
+	if !cm.IsObject() || cm.Index <= 0 || !cm.Get(gjson.Escape(key)).Exists() {
+		return body
+	}
+	have := map[string]any{}
+	if json.Unmarshal([]byte(cm.Raw), &have) != nil {
+		return body
+	}
+	delete(have, key)
+	raw, err := json.Marshal(have)
+	if err != nil {
+		return body
+	}
+	out := make([]byte, 0, len(body))
+	out = append(out, body[:cm.Index]...)
+	out = append(out, raw...)
+	return append(out, body[cm.Index+len(cm.Raw):]...)
+}
+
 // withClientMetadata is body with meta's keys set in its client_metadata,
 // every other byte as it was.
 func withClientMetadata(body []byte, meta map[string]string) ([]byte, bool) {
@@ -299,8 +350,10 @@ func codexSocketHeaders(req *http.Request) http.Header {
 }
 
 // socket opens a socket for the turn and sends msg on it; one that
-// carries on with key's conversation is kept for its next turn.
-func (t codexSocket) socket(req *http.Request, msg []byte, key string, shape *codexTurnShape) (*http.Response, error) {
+// carries on with key's conversation is kept for its next turn. A host
+// that refuses the handshake is left to HTTP for a while when shun says
+// so (a provider's Socket "on" never is).
+func (t codexSocket) socket(req *http.Request, msg []byte, key string, shape *codexTurnShape, shun bool) (*http.Response, error) {
 	// the socket may outlive the request, kept for the next turn: only
 	// the handshake ends with it
 	ctx, cancel := context.WithCancel(context.WithoutCancel(req.Context()))
@@ -320,6 +373,8 @@ func (t codexSocket) socket(req *http.Request, msg []byte, key string, shape *co
 			return nil, req.Context().Err()
 		}
 		switch {
+		case !shun:
+			// tried again next turn
 		case hs == nil:
 			shunCodexSocket(u.Host, err.Error())
 		case hs.StatusCode == http.StatusUnauthorized || hs.StatusCode == http.StatusTooManyRequests ||
@@ -368,14 +423,22 @@ func (t codexSocket) turn(req *http.Request, k *codexKept, msg []byte, shape *co
 		}
 		return err
 	}
+	trace := socketTrace(req, reused)
 	if err := k.c.Write(req.Context(), websocket.MessageText, msg); err != nil {
 		k.close()
 		return nil, ended(err)
 	}
+	wroteSocket(req.Context(), len(msg))
+	if trace != nil && trace.WroteRequest != nil {
+		trace.WroteRequest(httptrace.WroteRequestInfo{})
+	}
 	header := k.header.Clone()
 	body := &codexSocketBody{c: k.c, ctx: req.Context(), k: k, shape: shape}
-	for range codexSocketPrelude {
+	for i := range codexSocketPrelude {
 		frame, err := body.frame()
+		if i == 0 && err == nil && trace != nil && trace.GotFirstResponseByte != nil {
+			trace.GotFirstResponseByte()
+		}
 		if err != nil {
 			body.Close()
 			// nothing of the reply has been handed on yet
@@ -427,6 +490,33 @@ func (t codexSocket) turn(req *http.Request, k *codexKept, msg []byte, shape *co
 		ContentLength: -1,
 		Request:       req,
 	}, nil
+}
+
+// socketTrace tells req's client trace (TryNet, the usage record's
+// split) of the turn going out on the socket, as Go's client tells it of
+// an HTTP request: a turn on a kept socket is a request on an open
+// connection, which has no handshake of its own, and the frames' first is
+// the reply's first byte. Without it a kept socket's turn, nearly every
+// Codex turn after a conversation's first, wrote no request the trace
+// saw, and the Routing page's "Where the time went" said only its
+// masking (buhaodeshiyehao on X, Codex through Lody). On a new socket
+// the handshake went through the client and the trace has its DNS,
+// connect and TLS; the socket is the connection, got once the handshake
+// is answered, so the handshake's round trip is the wait for it. The
+// caller tells it WroteRequest once the message is written, and
+// GotFirstResponseByte at the first frame.
+func socketTrace(req *http.Request, reused bool) *httptrace.ClientTrace {
+	trace := httptrace.ContextClientTrace(req.Context())
+	if trace == nil {
+		return nil
+	}
+	if reused && trace.GetConn != nil {
+		trace.GetConn(req.URL.Host)
+	}
+	if trace.GotConn != nil {
+		trace.GotConn(httptrace.GotConnInfo{Reused: reused})
+	}
+	return trace
 }
 
 // codexSocketEnded is the turn going over HTTP after the socket ended,

@@ -266,14 +266,30 @@ type unroutedHold struct {
 	mexcused time.Duration
 	mdue     bool
 	most     *time.Timer
+	// gid is its handler's goroutine, whose own stack the report puts
+	// first (heldOwn): a report cut short, or pasted in part, still says
+	// where the request itself stood (wilsonxuuuu on X: 30s in no wait
+	// magpie knew of, the stacks cut from the tweet)
+	gid uint64
 }
 
 type unroutedKey struct{}
 
+// unroutedOf is ctx's watch while its handler runs, and nil after: the
+// context's value reaches it through the watch's held, as its timers do,
+// since a stopped context timer (a WithTimeout under the request's) keeps
+// its context, and so this value, as a stopped timer of its own would.
+func unroutedOf(ctx context.Context) *unroutedHold {
+	if held, _ := ctx.Value(unroutedKey{}).(*atomic.Pointer[unroutedHold]); held != nil {
+		return held.Load()
+	}
+	return nil
+}
+
 // noteAsked tells ctx's watch the model its request asked for, for the
 // route that shows it.
 func noteAsked(ctx context.Context, model string) {
-	if u, _ := ctx.Value(unroutedKey{}).(*unroutedHold); u != nil {
+	if u := unroutedOf(ctx); u != nil {
 		u.asked.Store(model)
 	}
 }
@@ -282,7 +298,7 @@ func noteAsked(ctx context.Context, model string) {
 // func it answers is called: a wait it knows of, whose time counts
 // toward neither unroutedUnknown nor unroutedMost.
 func noteMasking(ctx context.Context) func() {
-	u, _ := ctx.Value(unroutedKey{}).(*unroutedHold)
+	u := unroutedOf(ctx)
 	if u == nil {
 		return func() {}
 	}
@@ -378,7 +394,7 @@ func unroutedRecheck() time.Duration { return min(time.Second, unroutedMost/8) }
 // kind names the wait in the report of a request held too long
 // (heldReport): "body", "body room", "hooks" and the rest.
 func noteWait(ctx context.Context, kind string) (done func()) {
-	u, _ := ctx.Value(unroutedKey{}).(*unroutedHold)
+	u := unroutedOf(ctx)
 	if u == nil {
 		return func() {}
 	}
@@ -603,8 +619,20 @@ func (s *Server) watchUnrouted(w http.ResponseWriter, r *http.Request, f *inflig
 		return w, r, func() {}
 	}
 	ctx, cancel := context.WithCancelCause(r.Context())
-	u := &unroutedHold{s: s, f: f, w: newHeldWriter(w), cancel: cancel, agent: callerFrom(r).agent, saved: make(chan struct{})}
-	r = r.WithContext(context.WithValue(ctx, unroutedKey{}, u))
+	u := &unroutedHold{s: s, f: f, w: newHeldWriter(w), cancel: cancel, agent: callerFrom(r).agent, saved: make(chan struct{}), gid: goroutineID()}
+	// The timers and the context reach u through held alone, let go as
+	// the handler returns. A stopped timer is not gone: the runtime keeps
+	// it, and its func, in the timer heap of the P that set it until its
+	// time comes or that P next tidies its heap, and an idle P never
+	// does. Through u a stopped timer kept the request, its body and its
+	// context's values up to unroutedMost after the handler returned
+	// (#5250: a socket's last 256 KB turn body was kept that way), and a
+	// stopped context timer under the request's (a WithTimeout's) kept
+	// it through the context's values, this one and the inflight's, for
+	// as long (#5250 again).
+	held := new(atomic.Pointer[unroutedHold])
+	held.Store(u)
+	r = r.WithContext(context.WithValue(ctx, unroutedKey{}, held))
 	if r.Body != nil && r.Body != http.NoBody {
 		r.Body = waitedBody{r.Body, u}
 	}
@@ -612,15 +640,6 @@ func (s *Server) watchUnrouted(w http.ResponseWriter, r *http.Request, f *inflig
 	f.mu.Lock()
 	f.unrouted = u
 	f.mu.Unlock()
-	// The timers reach u through held alone, let go as the handler
-	// returns. A stopped timer is not gone: the runtime keeps it, and its
-	// func, in the timer heap of the P that set it until its time comes
-	// or that P next tidies its heap, and an idle P never does. Through u
-	// a stopped timer kept the request, its body and its context's values
-	// up to unroutedMost after the handler returned (#5250: a socket's
-	// last 256 KB turn body was kept that way).
-	held := new(atomic.Pointer[unroutedHold])
-	held.Store(u)
 	via := func(m func(*unroutedHold)) func() {
 		return func() {
 			if u := held.Load(); u != nil {
@@ -643,6 +662,11 @@ func (s *Server) watchUnrouted(w http.ResponseWriter, r *http.Request, f *inflig
 		f.mu.Lock()
 		// a timer that fired as the handler returned does nothing now
 		u.over = true
+		// nor does the request in flight reach u: its context's value
+		// (inflightOf) is kept by a stopped context timer as u's own is
+		if f.unrouted == u {
+			f.unrouted = nil
+		}
 		shown := u.shown
 		if !u.ended {
 			u.shown = nil
@@ -729,7 +753,8 @@ func (u *unroutedHold) giveUp(unknown bool) {
 	who := cmpOr(u.agent, cmpOr(f.agent, "?"))
 	said := cmpOr(where, " not masking it")
 	waits := u.waitsSaid()
-	report := u.s.heldReport(u, held, status, who, asked, said)
+	own := heldOwn(u.gid)
+	report := u.s.heldReport(u, held, status, who, asked, said, own)
 	// Saved before it is answered too, so the route the answer finds
 	// names it (#4200); out of f.mu, as it is a file written.
 	name, err := writeHeld(report)
@@ -777,7 +802,7 @@ func (u *unroutedHold) giveUp(unknown bool) {
 		(*hook)(u)
 	}
 	u.cancel(errUnrouted)
-	log.Printf("gateway: %s %s for %s from %s held %s before routing,%s%s; stopped with %d%s%s", u.r.Method, u.r.URL.Path, cmpOr(asked, "?"), who, held, said, waits, status, saved, unroutedStacks())
+	log.Printf("gateway: %s %s for %s from %s held %s before routing,%s%s, standing at %s; stopped with %d%s%s", u.r.Method, u.r.URL.Path, cmpOr(asked, "?"), who, held, said, waits, cmpOr(own.at, "?"), status, saved, unroutedStacks())
 }
 
 // unroutedMsg is the error of a request held for held before routing:

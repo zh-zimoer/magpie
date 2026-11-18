@@ -1,13 +1,12 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"net/http"
-	"regexp"
 	"slices"
 	"time"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -71,8 +70,8 @@ func busy(status int, body []byte) bool {
 	switch {
 	case busyStatus(status):
 		return failure(status, body) == failOther && !protectionRefused(status, body) &&
-			!bytes.Contains(body, []byte(didNotStream)) &&
-			!bytes.Contains(body, []byte(cutVoidWords)) &&
+			!bodyHas(body, didNotStream) &&
+			!bodyHas(body, cutVoidWords) &&
 			!queued(body)
 	case status == 429:
 		return failure(status, body) == failRate && !creditWords.Match(wordsOf(body)) && !walled(body)
@@ -93,7 +92,7 @@ func busy(status int, body []byte) bool {
 // queue status rather than sending the request again. Only the plugin's
 // own words are matched: a relay's 503 that names its own queue ("queue
 // full", 排队中) is a moment's overload, waited out as before.
-var queuedWords = regexp.MustCompile(`(?i)\bqueued the request\b|\bthis plan's queue:`)
+var queuedWords = lazyre.New(`(?i)\bqueued the request\b|\bthis plan's queue:`)
 
 // queued says whether a failure's body is the Qoder plugin's queue answer.
 func queued(body []byte) bool {
@@ -217,10 +216,16 @@ func minTime(a, b time.Time) time.Time {
 
 // pauseAlive waits d, keeping a streaming agent alive as a held stream
 // does once the request has gone keepHeldAfter without a word. false: the
-// agent went away first.
-func pauseAlive(ctx context.Context, w http.ResponseWriter, kept *keptAlive, streams bool, start time.Time, d time.Duration) bool {
+// agent went away first. A pause ends early once moved (when given) says
+// a provider about to be asked again was saved at another address
+// (readdressedOf).
+func pauseAlive(ctx context.Context, w http.ResponseWriter, kept *keptAlive, streams bool, start time.Time, d time.Duration, moved func() bool) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
+	edits := editsOf(moved)
+	if moved != nil && moved() {
+		return true // saved elsewhere while it was asked
+	}
 	var hw *holdWriter
 	if streams && kept != nil && kept.proto != provider.Gemini {
 		hw = newHoldWriter(w, true)
@@ -238,6 +243,61 @@ func pauseAlive(ctx context.Context, w http.ResponseWriter, kept *keptAlive, str
 		case <-ctx.Done():
 			return false
 		case <-tick.C:
+		case <-edits:
+			if moved() {
+				return true
+			}
+			edits = provider.Edited()
 		}
+	}
+}
+
+// pauseUntilReaddressed waits d, or until moved (when given) says a
+// provider about to be asked again was saved at another address. false:
+// ctx ended first.
+func pauseUntilReaddressed(ctx context.Context, d time.Duration, moved func() bool) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	edits := editsOf(moved)
+	if moved != nil && moved() {
+		return true // saved elsewhere while it was asked
+	}
+	for {
+		select {
+		case <-t.C:
+			return true
+		case <-ctx.Done():
+			return false
+		case <-edits:
+			if moved() {
+				return true
+			}
+			edits = provider.Edited()
+		}
+	}
+}
+
+// editsOf is provider.Edited when there is a moved to ask, else a channel
+// that never fires.
+func editsOf(moved func() bool) <-chan struct{} {
+	if moved == nil {
+		return nil
+	}
+	return provider.Edited()
+}
+
+// readdressedOf says whether any of cs is a Remote magpie saved at another
+// address since the request read it: the user typed its new address in
+// while the request paused before asking it again (le13ure on X). nil
+// when none of cs is a Remote magpie, for a pause that never wakes early.
+func readdressedOf(cs []candidate) func() bool {
+	if !slices.ContainsFunc(cs, func(c candidate) bool { return c.p.IsRemoteMagpie() }) {
+		return nil
+	}
+	return func() bool {
+		return slices.ContainsFunc(cs, func(c candidate) bool {
+			_, ok := provider.Readdressed(c.p)
+			return ok
+		})
 	}
 }

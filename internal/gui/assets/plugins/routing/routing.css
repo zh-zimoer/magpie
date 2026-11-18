@@ -3,7 +3,8 @@
    played by the gateway's own trace. */
 .rt { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px 12px; margin: 0 0 18px; }
 .rt-top { display: flex; flex-direction: column; gap: 3px; }
-.rt-what { font-size: 13px; color: var(--muted); }
+.rt-toprow { display: flex; align-items: flex-start; gap: 8px; }
+.rt-what { font-size: 13px; color: var(--muted); flex: 1; min-width: 0; }
 .rt-what b { color: var(--fg); font-weight: 600; }
 .rt-mode { margin: 0; font-size: 12.5px; color: var(--fg-2); line-height: 1.45; }
 /* the agents' and magpie's columns at least 124px, and as wide as their
@@ -118,10 +119,14 @@
 .rt-accts li:not(.rt-sub) > b > * { flex: none; }
 .rt-accts li:not(.rt-sub) > b > span:not(.ic) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .rt-accts li:not(.rt-sub) > b > span.who { flex-shrink: 100; } /* the name first, the plan after it */
-.rt-accts li:not(.rt-sub) > b > span:not(.ic):not(.who):not(:empty) { margin-left: .3em; }
+.rt-accts li:not(.rt-sub) > b > span:not(.ic):not(.who):not(.prov):not(:empty) { margin-left: .3em; }
+/* a key's row: its provider's name heads it and keeps its room; the key's
+   name follows, muted */
+.rt-accts li.keyled:not(.rt-sub) > b > span.who { margin-left: .3em; }
 .rt-accts li:not(.rt-sub) > b > .ic { align-self: center; }
 .rt-accts b > span:not(.ic) { font-weight: 450; color: var(--muted); }
-.rt-accts b > span.who { color: var(--fg); font-weight: 560; }
+.rt-accts b > span.who, .rt-accts li.keyled b > span.prov { color: var(--fg); font-weight: 560; }
+.rt-accts li.keyled b > span.who { color: var(--muted); font-weight: 450; }
 .rt-accts b .ic { display: inline-flex; width: 16px; height: 16px; margin-right: 7px; vertical-align: -3px; }
 .rt-accts b .ic img, .rt-accts b .ic svg { width: 16px; height: 16px; }
 .rt-accts b .fb { margin-left: 6px; font-size: 10.5px; font-weight: 560; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
@@ -135,13 +140,15 @@
 /* the session an account answers (connor_yang on Discord): one line cut
    short, also where a narrow stage lets the status wrap */
 .rt-accts em .ses { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
-.rt-accts .bar { grid-column: 2 / 4; height: 3px; border-radius: 2px; background: var(--card-2); overflow: hidden; }
-.rt-accts .bar i { display: block; height: 100%; width: 0; border-radius: 2px; background: var(--muted); transition: width .4s; }
+/* an account's bar is Usage's .quota-track (app.css), its colours the
+   same in either theme (normalcoder_ on X: grey and black here, blue
+   there); only its size and place are the stage's */
+.rt-accts .bar { grid-column: 2 / 4; height: 3px; }
+.rt-accts .bar i { width: 0; transition: width .4s; }
 .rt-accts li.nobar .bar { display: none; }
 .rt-accts .dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--muted); }
 .rt-accts li.on { border-color: var(--fg); }
 .rt-accts li.on em { color: var(--fg); }
-.rt-accts li.on .bar i { background: var(--fg); }
 .rt-accts li.on .dot { background: var(--fg); border-color: var(--fg); }
 /* A live dot's pulse: a disk 6px wider all round grows from the dot and
    fades. It moves by transform and opacity, on the compositor: as a
@@ -186,8 +193,26 @@
 .rt-accts li.rt-fold:focus { outline: none; }
 .rt-accts li.rt-fold:focus-visible { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
 .rt-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px 20px; flex-wrap: wrap; padding-top: 10px; border-top: 1px solid var(--line); }
-.rt-cap { flex: 1 1 20em; margin: 0; min-height: 3em; display: flex; align-items: center; font-size: 13px; line-height: 1.45; color: var(--fg); }
+.rt-cap { flex: 1 1 20em; margin: 0; min-height: 54px; display: flex; align-items: center; font-size: 13px; line-height: 1.45; color: var(--fg); }
 .rt-cap.in { animation: rtin .4s ease-out; }
+/* a try's answer in the caption (answered): who, model and effort over
+   its figures, each in a column of its own whatever the others say, as
+   the counts beside it are (Puremilk_chun on X) */
+.rt-done { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 3px 14px; }
+.rt-done > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rt-done > .who { grid-column: span 2; font-size: 12px; line-height: 17px; font-weight: 560; }
+.rt-done > .mdl { grid-column: span 2; font-size: 12px; line-height: 17px; color: var(--fg-2); }
+.rt-done > .effort-of { font-size: 12px; line-height: 17px; color: var(--muted); }
+.rt-done > .fig { display: flex; flex-direction: column; font-size: 11px; line-height: 14px; color: var(--muted); }
+.rt-done > .fig > * { overflow: hidden; text-overflow: ellipsis; }
+.rt-done > .fig b { font-size: 15px; line-height: 19px; font-weight: 650; letter-spacing: -.01em; color: var(--fg); font-variant-numeric: tabular-nums; }
+.rt-done > .fig b small { line-height: 0; font-size: 11px; font-weight: 500; letter-spacing: 0; color: var(--fg-2); }
+/* a narrow stage (max720, set by client.js): three to a line, in the
+   same places on every answer */
+:where(.rt.max720) .rt-done { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+:where(.rt.max720) .rt-done > .who { grid-column: span 2; }
+:where(.rt.max720) .rt-done > .mdl { grid-column: 1 / -1; grid-row: 2; }
+.rt-done > .fig.none b { color: var(--faint); font-weight: 400; }
 @keyframes rtin { from { opacity: 0; transform: translateY(4px); } }
 .rt-stats { display: flex; gap: 18px; font-size: 11px; color: var(--muted); }
 .rt-stats > span { display: flex; flex-direction: column; }
@@ -279,7 +304,12 @@
 :is(#view-routing, #view-groups) .row-head { margin: 14px 0 6px; padding: 0 2px; gap: 0; }
 :is(#view-routing, #view-groups) .row-head .note { font-size: 11px; color: var(--faint); margin-left: 8px; }
 #view-routing .row-head .rt-livedot + .note { margin-left: 8px; }
+/* the note gives way first: with Routing groups ›, Settings › and Hide
+   accounts beside it, German ran 38px past a 560px window (#6669) */
+#view-routing > .row-head .note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rt-gnew { display: inline-flex; align-items: center; gap: 4px; }
+/* the toolbar's Hide plans: every group's quota lines folded */
+.rt-groups.rt-noplans .rt-gquota { display: none; }
 /* the groups page's toolbar: the filter first, then how many */
 .rt-gsec > .row-head:first-child .rt-gfilter { flex: 0 1 300px; width: auto; margin: 0; }
 .rt-gsec > .row-head:first-child .rt-gcount { margin-left: 10px; white-space: nowrap; }
@@ -308,7 +338,10 @@ body.side-nav #view-groups:not(.rt-gfrom) .rt-gback { display: none; }
    few accounts'. Only where the requests' column still keeps each request
    on one line (wider than 760px, see below): narrower, one column of
    one-line requests reads better than two with each request on three
-   (#860, huoranxuanyuan). Where the page is 1150px wide or more. Kept to
+   (#860, huoranxuanyuan). Where the page is 1150px wide or more and the
+   requests, tried beside, keep their numbers on one line (sideFit in
+   client.js: normalcoder_ on X saw a wider window put each request on two
+   lines where a narrower one kept it on one). Kept to
    28%, no more than 360px: in a page kept to 1200px the accounts had room
    to spare while the requests' models were cut (#1926, hibaliqya-yonma) */
 :where(.rt-more.min1150) .rt-cols { grid-template-columns: minmax(0, 1fr) clamp(260px, 28%, 360px); }
@@ -433,6 +466,8 @@ button.rt-session { cursor: pointer; }
 .rt-purpose.open svg { transform: rotate(180deg); }
 .rt-metric-pick { display: inline-flex; align-items: center; gap: 3px; height: 24px; margin-left: 6px; }
 .rt-metric-pick.open svg { transform: rotate(180deg); }
+.rt-depth { display: inline-flex; align-items: center; gap: 5px; flex: none; margin: -3px -7px -3px 0; }
+.rt-depth svg { flex: none; }
 .rt-fold-all { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; margin-left: 2px; }
 .pop.proto-menu.rt-metric-menu { width: 190px; max-width: calc(100vw - 16px); background: var(--card); }
 .rt-metric-menu .pm-item { align-items: center; }
@@ -475,6 +510,13 @@ button.rt-session { cursor: pointer; }
 :where(.rt-more:not(.min1150)) .rt-pgrp.long, .rt-cols.solo .rt-pgrp.long { break-inside: auto; }
 :where(.rt-more:not(.min1150)) .rt-pgrp.long > *, .rt-cols.solo .rt-pgrp.long > * { break-inside: avoid; }
 :where(.rt-more:not(.min1150)) .rt-pgrp.long > .rt-prov, .rt-cols.solo .rt-pgrp.long > .rt-prov { break-after: avoid; }
+/* placed by client.js (packActs) in the columns CSS columns would have
+   them in: CSS columns balanced every row again on each layout, and a
+   window resized over many accounts stuttered (lexrus on X) */
+:where(.rt-more:not(.min1150)) .rt-acts.packed, .rt-cols.solo .rt-acts.packed { columns: auto; position: relative; box-sizing: content-box; height: var(--acts-h, auto); }
+:where(.rt-more:not(.min1150)) .rt-acts.packed > *, .rt-cols.solo .rt-acts.packed > * { position: absolute; left: var(--px, 0); top: var(--py, 0); width: calc(100% / var(--acols, 1)); }
+:where(.rt-more:not(.min1150)) .rt-acts.packed > .long, .rt-cols.solo .rt-acts.packed > .long { height: var(--part-h, auto); }
+:where(.rt-more:not(.min1150)) .rt-acts.packed > .long > *, .rt-cols.solo .rt-acts.packed > .long > * { position: absolute; left: var(--px, 0); top: var(--py, 0); width: 100%; }
 .rt-cols.solo { grid-template-columns: minmax(0, 1fr); }
 .rt-reqs.none { display: block; background: none; border-color: transparent; }
 .rt-reqs.none .empty-state { padding: 14px 12px 18px; font-size: 12px; line-height: 1.6; }
@@ -540,6 +582,25 @@ button.rt-session { cursor: pointer; }
    figure of its own, the rest of it on hover */
 .rt-act .wins { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-2); font-size: 11px; font-variant-numeric: tabular-nums; }
 .rt-act .wins span + span { margin-left: 12px; }
+/* every window of a subscription account, a line each, alike on every
+   row (zwm_vincent on X): short name, bar, used or left, reset, in
+   columns that start at one place down the list */
+.rt-act .wq { display: grid; font-size: 11px; line-height: 17px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.rt-act .wq > div { display: flex; flex-wrap: wrap; align-items: center; column-gap: 8px; }
+.rt-act .wq span { min-width: 0; }
+/* each part no wider than its row (lexrus on X: a width the provider's
+   widest window asked for, wider than a column, ran the reset over the
+   column beside); one wider than the row goes on a line of its own and
+   breaks between its words there, in full */
+.rt-act .wq .k { flex: 0 0 min(var(--wk, 3ch), 100%); overflow-wrap: anywhere; }
+.rt-act .wq .b { flex: 0 0 28px; }
+.rt-act .wq .v { flex: 0 0 auto; min-width: min(var(--wv, 0px), 100%); max-width: 100%; }
+.rt-act .wq .r { flex: 1 0 auto; min-width: min(var(--wr, 0px), 100%); max-width: 100%; text-align: right; }
+.rt-act .wq .k, .rt-act .wq .r { color: var(--muted); }
+.rt-act .wq .quota-track { height: 3px; }
+/* rows too narrow for a bar beside what is used (slim, set by
+   client.js): the figures alone */
+.rt-acts:where(.slim) .wq .b { display: none; }
 .rt-act .tally { display: flex; gap: 0 10px; overflow: hidden; white-space: nowrap; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .rt-act .tally > span { flex: none; }
 .rt-act .tally > span:last-child { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -554,9 +615,8 @@ button.rt-session { cursor: pointer; }
 /* under the cell, in its bottom padding: every cell keeps its height. In
    the flow, not absolute: Chromium put an absolute bar of a row in a
    column's unbroken block (.rt-lead) over the row above it */
-.rt-act .bar { height: 2px; margin: 2px 0 -4px; border-radius: 2px; background: var(--card-2); overflow: hidden; }
+.rt-act .bar { height: 2px; margin: 2px 0 -4px; }
 .rt-act:has(> .bar) { padding-bottom: 8px; }
-.rt-act .bar i { display: block; height: 100%; border-radius: 2px; background: var(--muted); }
 /* a provider's keys summed up in one row (#1319), opened to each */
 .rt-act.rt-keys { cursor: pointer; user-select: none; }
 .rt-act.rt-keys .chev { display: inline-flex; align-self: center; margin-left: auto; color: var(--muted); transition: transform .2s; }
@@ -624,7 +684,13 @@ button.rt-session { cursor: pointer; }
    opens the editor (groupRow). Its controls stay controls. */
 .rt-groups:not(.sorting) > .rt-group :is(.nm b, .nm code.mdl, .mem),
 .rt-gedit .fallback:not(.rt-rules) > .fbl:not(.sorting) > .fbrow > .n, .rt-gaccts > .fbrow > .n { user-select: text; -webkit-user-select: text; }
+.rt-group .rt-gnote { margin-top: 1px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rt-group .mem { margin-top: 2px; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* a member reads as one piece, its provider quiet and its model after,
+   so the list's own comma or arrow is what parts one from the next
+   (tmr11235 on X) */
+.rt-group .mem .mn { color: var(--fg-2); }
+.rt-group.disabled .mem .mn { color: inherit; }
 /* a pattern the group finds models by, and how many it matches now */
 .rt-group .mem.pat code, .rt-pats code { font: var(--code-style, normal) 500 11px/1.5 var(--code-font, var(--code)); font-stretch: var(--code-stretch, 100%); color: var(--fg-2); }
 .rt-group .mem.pat.none, .rt-pats .fbrow.none small { color: var(--amber); }
@@ -685,6 +751,11 @@ button.rt-session { cursor: pointer; }
 .rt-group.rt-gpick { cursor: default; }
 .rt-group.rt-gpick.on { background: var(--card-2); }
 .rt-gedit { cursor: default; scroll-margin-top: 12px; }
+/* the rows folded under Advanced keep the editor's own columns, so their
+   fields start where the ones above do; a label longer than the column
+   wraps in it, as one above the fold does */
+.rt-gedit .rt-gadv .inner { grid-template-columns: var(--ed-lab, 72px) minmax(0, 1fr); }
+.rt-gedit .rt-gadv .inner label { white-space: normal; }
 /* the group being edited reads as selected among the others: a soft tint
    and an accent ring, as a list marks its selected row; its Save and
    Cancel stay at the bottom of the window while its rows scroll by, at a
@@ -712,6 +783,7 @@ body.window .rt-gedit > .bar { --vfoot: 8px; }
 .rt-gedit .gsuffix { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
 .rt-gedit .gsuffix .hint { overflow-wrap: anywhere; }
 .rt-gedit .ctx-wrap input.ctx-in { width: 96px; flex: none; }
+.rt-gedit input.cmp-in { width: 96px; flex: none; }
 .rt-gedit .ctx-wrap input.first-in { width: 64px; }
 .rt-gedit .ctx-wrap .first-unit { margin-left: -2px; color: var(--muted); font-size: 12px; }
 .rt-gedit .ctx-wrap .first-unit[hidden] { display: none; }
@@ -737,10 +809,14 @@ body.window .rt-gedit > .bar { --vfoot: 8px; }
   body.web .rt-group > .text { grid-column: 3; grid-row: 1; }
   body.web .rt-group .nm { flex-wrap: wrap; }
   body.web .rt-group .mem { white-space: normal; overflow-wrap: anywhere; }
+  /* wrapped, a member moves to the next line whole, cut short only when
+     it is wider than the card */
+  body.web .rt-group .mem .mbr { display: inline-block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
   body.web .rt-pick { height: auto; min-height: 44px; padding: 8px; font-size: 12.5px; }
   body.web .rt-pick { flex-wrap: wrap; }
   body.web .rt-gedit { grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 12px; }
   body.web .rt-gedit label { text-align: left; padding-top: 8px; }
+  body.web .rt-gedit .rt-gadv .inner { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   body.web .rt-gedit .segs { flex-wrap: wrap; }
   body.web .rt-gedit .fbrow { flex-wrap: wrap; justify-content: normal; }
   body.web .rt-gedit .fbrow .n { flex: 1 1 calc(100% - 60px); white-space: normal; overflow-wrap: anywhere; }
@@ -764,6 +840,7 @@ body.window .rt-gedit > .bar { --vfoot: 8px; }
 :where(.rt-gpage.max520) .rt-gsec .rt-gfilter { flex: 1 1 auto; width: auto; }
 :where(.rt-gpage.max520) .rt-gedit { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 :where(.rt-gpage.max520) .rt-gedit label { text-align: left; padding-top: 8px; }
+:where(.rt-gpage.max520) .rt-gedit .rt-gadv .inner { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 :where(.rt-gpage.max520) .rt-gedit .segs .opt { padding-left: 9px; padding-right: 9px; }
 /* the models and patterns take the column's width and no more: a grid's
    auto track grows to its widest row's content, so a long model name with
@@ -792,6 +869,10 @@ body.window .rt-gedit > .bar { --vfoot: 8px; }
 .rt-gedit .fbl.sorting { user-select: none; -webkit-user-select: none; }
 .rt-gedit .fbl.sorting > .fbrow { transition: transform .22s cubic-bezier(.22, 1, .36, 1); }
 .rt-gedit .fbl.sorting .rt-mhandle { cursor: grabbing; }
+/* a member's row drags from its room around the words too */
+.rt-gedit .fbrow.rt-mrow { cursor: grab; touch-action: pan-y; }
+.rt-gedit .fbrow.rt-mrow .n > * { cursor: auto; }
+.rt-gedit .fbl.sorting > .fbrow.dragging { cursor: grabbing; }
 .rt-gedit .fbl > .fbrow.dragging { position: relative; z-index: 2; background: var(--card); box-shadow: 0 6px 18px rgba(20, 22, 30, .12), 0 0 0 1px var(--line); border-radius: 8px; transition: none; }
 @media (prefers-reduced-motion: reduce) { .rt-gedit .fbl.sorting > .fbrow { transition: none; } }
 .rt-gedit .fbrow.muted > :not(.rt-mon):not(.text) { opacity: .45; }
@@ -811,6 +892,10 @@ body.window .rt-gedit > .bar { --vfoot: 8px; }
 .rt-gedit .fbrow .rt-gacct { flex: 0 1 auto; min-width: 0; }
 .rt-gedit .fbrow .rt-gacct > span { overflow: hidden; text-overflow: ellipsis; }
 .rt-gedit > .rt-gacc[hidden] { display: none; }
+/* a group bound to gateway keys (Group.Keys): a long key name ellipsizes */
+.rt-gedit > .rt-gkeys[hidden] { display: none; }
+.rt-gkey { min-width: 0; }
+.rt-gredact-b { min-width: 0; }
 .rt-gadd {
   justify-self: start; display: inline-flex; align-items: center; gap: 6px;
   height: 28px; padding: 0 11px 0 9px; border-radius: 8px;
@@ -950,6 +1035,17 @@ body.window .rt-gedit > .bar { --vfoot: 8px; }
 .rt-cond.tm { cursor: text; }
 .rt-cond.tm input.clock, .editor .rt-cond.tm input.clock[type="text"] { width: 5.5ch; text-align: center; }
 .rt-cond.tm.bad { border-style: solid; border-color: var(--amber, var(--muted)); }
+/* how a pill compares (aipha2025 on X): a word in the pill that opens the
+   app's menu, quiet until it is pointed at */
+.rt-aopw { display: contents; }
+.rt-op { display: inline-flex; align-items: center; height: 20px; padding: 0 4px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; flex: none; white-space: nowrap; transition: background-color .15s ease; }
+@media (hover: hover) and (pointer: fine) { .rt-op:hover { background: var(--pill-hover, var(--pill)); } }
+.rt-op:focus-visible { outline: none; background: var(--pill-hover, var(--pill)); }
+.rt-cond.ef { cursor: default; }
+.rt-cond.rt-tx { cursor: text; }
+.rt-cond.rt-tx > span { flex: none; }
+.rt-cond.rt-tx > input { min-width: 0; flex: 0 1 auto; }
+.rt-cond.rt-tx.bad { border-style: solid; border-color: var(--amber, var(--muted)); }
 /* the time zone a rule's hours are in, when the server's clock is another */
 .rt-zone { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .rt-cond[hidden] { display: none; }

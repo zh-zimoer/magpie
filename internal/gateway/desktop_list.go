@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 
@@ -29,38 +30,38 @@ import (
 // drop the rest (2.7032's entry is a zod object, which strips unknown
 // keys).
 
-// desktopBehavesAs is the newest Claude model of each tier in Claude
-// Desktop's own model catalog (v3739), which Claude Code 2.1.316 knows.
+// desktopBehavesAs is the newest Claude model of each tier as Claude Code
+// 2.1.321 knows them (its latest_per_family; Fable 5.2 has a prompt bundle
+// of its own there). The Desktop catalog that build carries (v4371,
+// 2026-11-09) still ends the fable tier at Fable 5.1, and a Claude Code
+// older than 2.1.321 doesn't know Fable 5.2, so on one the fable tier runs
+// with the generic prompt until it updates.
 var desktopBehavesAs = map[string]string{
 	"opus":   "claude-opus-5-5",
 	"sonnet": "claude-sonnet-5-5",
 	"haiku":  "claude-haiku-5-5",
-	"fable":  "claude-fable-5-1",
+	"fable":  "claude-fable-5-2",
 }
 
 // DesktopBehavesAs is the Claude model each picked tier's model runs as in
-// Desktop's Code tab, by the id Desktop hands Claude Code (DesktopID, and
-// for a tier after the first its desktopTierAlias); one Claude Code knows
-// as a Claude model by that id has its own already (desktopRunsAs). ok is
-// false when the picks can't be read.
+// Desktop's Code tab, by the id Desktop hands Claude Code (DesktopID); one
+// Claude Code knows as a Claude model by that id has its own already
+// (desktopRunsAs). A tier's own id for a model picked for two
+// (desktopTierAlias) has none: Desktop hands Claude Code behavesAs from
+// inferenceModels alone, and that id is listed in /v1/models only
+// (DesktopTierRows). ok is false when the picks can't be read.
 func DesktopBehavesAs() (as map[string]string, ok bool) {
 	picked, ok := desktopTiersKnown()
 	if !ok {
 		return nil, false
 	}
-	tierOf, more := desktopTierOf(picked), desktopSharedTiers(picked)
+	tierOf := desktopTierOf(picked)
 	shown, _ := provider.CatalogFor("claude-desktop")
 	as = map[string]string{}
 	for _, e := range shown {
 		if t := tierOf[e.ID]; t != "" {
 			if b := desktopRunsAs(e, DesktopID(e), t); b != "" {
 				as[DesktopID(e)] = b
-			}
-		}
-		for _, t := range more[e.ID] {
-			id := desktopTierAlias(e, t)
-			if b := desktopRunsAs(e, id, t); b != "" {
-				as[id] = b
 			}
 		}
 	}
@@ -91,35 +92,36 @@ func DesktopTierAliases() map[string][]string {
 }
 
 // DesktopInferenceModels is the inferenceModels list magpie gives Claude
-// Desktop's profile: nil while no model it lists is picked for a tier,
-// when Desktop finds magpie's models on its own (/v1/models). ok is false
+// Desktop's profile: nil while no model it lists is picked for a tier and
+// no two rows read alike there (desktopNamesClash), when Desktop finds
+// magpie's models on its own (/v1/models). ok is false
 // when the picks can't be read: whatever is written stays. A model picked
-// for a tier after the first it is picked for is listed once more after
-// the rows, for that tier (desktopSharedTiers), so the first row, which a
-// new session starts on, stays the first.
+// for two tiers is tagged here with the first only; the later tiers are
+// given it through /v1/models (DesktopTierRows), as every entry here is a
+// row of Desktop's model menu, which the list replaces (yanghonghang on X:
+// "Gemini 4 Hydrogen · haiku" in the menu beside Gemini 4 Hydrogen).
 func DesktopInferenceModels() (list []map[string]any, ok bool) {
 	picked, ok := desktopTiersKnown()
 	if !ok {
 		return nil, false
 	}
-	tierOf, more := desktopTierOf(picked), desktopSharedTiers(picked)
+	tierOf := desktopTierOf(picked)
 	shown, _ := provider.CatalogFor("claude-desktop")
 	rows := desktopModels(shown, true)
 	tagged := false
-	var again []map[string]any
 	for i, m := range rows {
 		e := shown[i]
 		id, _ := m["id"].(string)
 		name, long := strings.CutSuffix(id, "[1m]")
 		// Desktop reads /v1/models no more once a profile lists models
 		// whose names aren't bare tier words (adminListObviatesDiscovery
-		// in its app.asar, 4.4212), and names an entry by its
-		// labelOverride, else its catalog's name, else the discovered
-		// row's, else the id itself (pzn, ngn): every mythos-magpie-<n>
-		// read as that id (chengming0v0 on Discord). Each entry is
-		// labelled as /v1/models labels its row, a catalog-named Claude
-		// model too, whose provider the skipped description said
-		// (desktopSaidBy).
+		// in its app.asar, 4.4212), unless modelDiscoveryEnabled says to
+		// (DesktopDiscovers), and names an entry by its labelOverride,
+		// else its catalog's name, else the discovered row's, else the id
+		// itself (pzn, ngn): every mythos-magpie-<n> read as that id
+		// (chengming0v0 on Discord). Each entry is labelled as /v1/models
+		// labels its row, a catalog-named Claude model too, whose
+		// provider the skipped description said (desktopSaidBy).
 		entry := map[string]any{"name": name, "labelOverride": m["display_name"]}
 		if long {
 			entry["supports1m"], entry["prefer1m"] = true, true
@@ -134,25 +136,101 @@ func DesktopInferenceModels() (list []map[string]any, ok bool) {
 			}
 		}
 		list = append(list, entry)
-		for _, t := range more[e.ID] {
-			alias := desktopTierAlias(e, t)
-			x := map[string]any{"name": alias, "labelOverride": fmt.Sprint(m["display_name"]) + " · " + t,
-				"anthropicFamilyTier": t, "isFamilyDefault": true}
-			for _, k := range []string{"supports1m", "prefer1m"} {
-				if v, has := entry[k]; has {
-					x[k] = v
-				}
-			}
-			if b := desktopRunsAs(e, alias, t); b != "" {
-				x["behavesAs"] = b
-			}
-			again = append(again, x)
-		}
 	}
-	if !tagged {
+	if !tagged && !desktopNamesClash(rows) {
 		return nil, true
 	}
-	return append(list, again...), true
+	return list, true
+}
+
+// desktopNamesClash says two of rows are ones Claude Desktop names after
+// the same model of its own catalog (desktopCatalogNamed), so its menu
+// reads them alike whatever their display_name says, and Desktop 5.11492
+// tells them apart by the part of their ids that differs, "Opus 5.5
+// (…5226054409.anthropic.claude-opu…)" (onkashiko on X: agy-cli's and
+// another provider's claude-opus-5-5). Only an entry's labelOverride comes
+// before the catalog's name, and Desktop leaves such an entry's label as
+// it is (xVn in its app.asar, 5.11492: keep), so while two clash the list
+// is written for each row's display_name ("Opus 5.5 · agy-cli"), as while
+// a tier is picked. The ids stay as they are.
+func desktopNamesClash(rows []map[string]any) bool {
+	seen := map[string]bool{}
+	for _, m := range rows {
+		id, _ := m["id"].(string)
+		c := desktopCatalogNamed(id)
+		if c == "" {
+			continue
+		}
+		if seen[c] {
+			return true
+		}
+		seen[c] = true
+	}
+	return false
+}
+
+// desktopCatalogNamed is the Claude model of Desktop's catalog that it
+// names a row of id by, as it reads ids (IC in its app.asar: lowercased,
+// "[1m]" and a Bedrock-style "<profile>.anthropic." prefix and a date taken
+// off), or "" for an id it names by display_name.
+func desktopCatalogNamed(id string) string {
+	m := strings.ToLower(strings.TrimSuffix(id, "[1m]"))
+	if _, rest, ok := strings.Cut(m, desktopClaudeInfix); ok {
+		m = rest
+	}
+	m = desktopDated.ReplaceAllString(m, "")
+	if desktopClaude.MatchString(m) {
+		return m
+	}
+	return ""
+}
+
+// DesktopDiscovers says magpie's Desktop profile has Desktop read
+// /v1/models beside its inferenceModels (modelDiscoveryEnabled): while a
+// model is picked for two tiers, whose later tiers only /v1/models gives
+// (DesktopTierRows). Desktop's Code tab pins a tier from a discovered row
+// tagged with it (shortnameIdentityOverrides in its app.asar, 2.7032 and
+// 4.23118) and one from inferenceModels over that, while its menu is the
+// list alone (gXn, 4.23118: the discovered rows only name the list's
+// entries), so the later tier gets its model and no row of its own in the
+// menu. ok is false when the picks can't be read.
+func DesktopDiscovers() (on, ok bool) {
+	if _, ok := desktopTiersKnown(); !ok {
+		return false, false
+	}
+	return len(DesktopTierAliases()) > 0, true
+}
+
+// DesktopTierRows are the /v1/models rows, after rows (desktopModels of
+// shown), that give Desktop's Code tab a model picked for two tiers for the
+// later ones (desktopSharedTiers): the model's row under its tier's id
+// (desktopTierAlias), tagged with that tier. Desktop keys its tiers by
+// model id and reads one tier off a row, so the model's own row can't
+// carry the second; the menu never shows these while inferenceModels is
+// written (DesktopDiscovers).
+func DesktopTierRows(shown []provider.Entry, rows []map[string]any) []map[string]any {
+	picked, ok := desktopTiersKnown()
+	if !ok {
+		return nil
+	}
+	more := desktopSharedTiers(picked)
+	var out []map[string]any
+	for i, e := range shown {
+		if i >= len(rows) {
+			break
+		}
+		for _, t := range more[e.ID] {
+			r := maps.Clone(rows[i])
+			r["id"] = desktopTierAlias(e, t)
+			r["display_name"] = fmt.Sprint(rows[i]["display_name"]) + " · " + t
+			r["anthropic_family_tier"], r["is_family_default"] = t, true
+			if strings.HasSuffix(fmt.Sprint(rows[i]["id"]), "[1m]") {
+				r["supports_1m"] = true
+			}
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // desktopTierOf is the tier each picked model is tagged with: a model

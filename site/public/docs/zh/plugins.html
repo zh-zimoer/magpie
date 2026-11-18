@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>插件开发 · magpie 文档</title>
+<title>插件开发：用 OpenCode 插件或 pi 扩展包添加供应商 · magpie 文档</title>
 <meta name="description" content="如何编写 magpie 插件：magpie 调用哪些 OpenCode 插件钩子、运行哪些 pi 扩展包，如何把它们变成带账号、模型、请求和用量的供应商，以及怎么测试、发布和上架。">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
@@ -39,6 +39,54 @@
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/zh/plugins">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "TechArticle",
+   "headline": "编写插件",
+   "description": "如何编写 magpie 插件：magpie 调用哪些 OpenCode 插件钩子、运行哪些 pi 扩展包，如何把它们变成带账号、模型、请求和用量的供应商，以及怎么测试、发布和上架。",
+   "inLanguage": "zh-CN",
+   "url": "https://usemagpie.ai/docs/zh/plugins",
+   "about": {
+    "@type": "SoftwareApplication",
+    "name": "magpie",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Windows, Linux"
+   },
+   "publisher": {
+    "@type": "Organization",
+    "name": "magpie",
+    "url": "https://usemagpie.ai/"
+   }
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/zh/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "文档",
+     "item": "https://usemagpie.ai/docs/zh/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "编写插件",
+     "item": "https://usemagpie.ai/docs/zh/plugins"
+    }
+   ]
+  }
+ ]
+}
+</script>
 </head>
 <body>
 
@@ -310,6 +358,9 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
     </div>
     <p>模型还可以写 <code>provider: { npm, api }</code>，使用和供应商不同的 API 或地址；也可以写 <code>headers</code>、<code>options</code>，以及用 <code>disabled: true</code> 隐藏它。</p>
 
+        <h3 id="vendor">转发 magpie 认识的厂商</h3>
+    <p>如果提供商的 <code>api</code> 是 magpie 有预设的厂商 API（<code>https://api.mistral.ai/v1</code>、<code>https://api.deepseek.com/v1</code>、<code>https://openrouter.ai/api/v1</code> 等），magpie 会像对待该厂商一样处理发给你的提供商的请求，再交给你的 <code>fetch</code>：Mistral 的 thinking 片段代替 <code>reasoning_content</code>、DeepSeek 和 xAI 的 schema 规则、OpenRouter 的免费池等。无需额外配置，读的就是你已经给出的 base URL，即使 loader 的 <code>baseURL</code> 指向别处。不在任何预设主机上、在 <code>localhost</code> 或局域网上的地址不会套用任何厂商的处理。</p>
+
         <h3 id="searches">自己能联网搜索的上游</h3>
     <p>如果插件转发的是 Anthropic 或 OpenAI 官方 API（它们自己执行托管的联网搜索工具），在 <code>config</code> 钩子里给提供商设 <code>searches: true</code>。之后客户端的联网搜索（Claude Code 的 WebSearch、Codex 的 <code>web_search</code>）会原样发到你的 <code>fetch</code>，只作用于该提供商走 Anthropic 或 Responses 的模型，不再经过 magpie 自己的代搜；Chat 模型不受影响。magpie 不会自动用它替其他模型搜索，但可以在设置里手动指定它为搜索模型。</p>
 
@@ -551,6 +602,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
     amount: 370, limit: 1000, unit: <span class="s">"credits"</span>, <span class="c">// 按数量计时，窗口自己的用量</span>
     model: <span class="s">"opus"</span>,              <span class="c">// 只统计 id 含这个词的模型</span>
     models: [], notModels: [],  <span class="c">// 或恰好这些 id，或除这些外的全部</span>
+    family: <span class="s">"Gemini"</span>, pool: <span class="s">"Gemini"</span>, <span class="c">// 模型所属系列，和共用一份额度的分组：卡片显示分组自己的窗口（不带 model 和 family），代替其中各模型的</span>
     aside: false,               <span class="c">// true：用完也不影响账号使用</span>
     runsOutAt: <span class="s">"2026-10-05T00:00:00Z"</span>, runsOut: 120, <span class="c">// 剩余额度中最早作废的一笔何时作废、作废多少</span>
     balance: 6291,              <span class="c">// 预付钱包：剩余多少（按 unit 计），不写 used 和 limit</span>
@@ -606,7 +658,7 @@ magpie quota                             <span class="c"># acme · Pro · 5h 37%
       <li><b>取值。</b>100 表示供应商同时能服务的满载；会排队的供应商可以报超过 100 的值（200 是满载的两倍）。小于 0 按 0 算，大于 10000 按 10000 算（防止离谱的值）。其他值（字符串、<code>NaN</code>）丢弃。模型 id 不区分大小写，<code>model@256k</code> 没单独报时用它所属模型的负载。一次最多 1000 个模型，返回收下的个数。provider 不是字符串，或 <code>loads</code> 不是对象，会抛出 <code>TypeError</code>。</li>
       <li><b>时效。</b>每个模型的负载从报告它的那次调用起算五分钟有效，之后就是未知，绝不当作 0：插件不再报告时，它的模型保持原位。一次调用没提到的模型，保留上次的负载，直到它自己的五分钟到期。</li>
       <li><b>在哪显示。</b>供应商编辑页里模型旁边的灰色小数字。</li>
-      <li><b>路由。</b>在 设置 › 网络与共享 › 繁忙的模型靠后 选了阈值（默认关闭；可选高于 50、70、80 或 90%，或选“自定义…”输入 1 到 9999 之间的任意数，比如会排队的供应商可设 150）后，报告负载高于它的模型会排到请求能去的其他候选之后，但仍在失败后休息的候选之前。它答过的对话在下一轮换到排在最前的那个；同一轮之内不换。没有已知负载的模型保持原位。路由追踪里显示 <code>busy</code> 和负载值。</li>
+      <li><b>路由。</b>在 设置 › 模型 › 路由 › 繁忙的模型靠后 选了阈值（默认关闭；可选高于 50、70、80 或 90%，或选“自定义…”输入 1 到 9999 之间的任意数，比如会排队的供应商可设 150）后，报告负载高于它的模型会排到请求能去的其他候选之后，但仍在失败后休息的候选之前。它答过的对话在下一轮换到排在最前的那个；同一轮之内不换。没有已知负载的模型保持原位。路由追踪里显示 <code>busy</code> 和负载值。</li>
     </ul>
     <p>为旧版宿主写的插件先检查 <code>input.magpie?.load</code>，如上例。</p>
 
@@ -686,8 +738,9 @@ m plugin logout acme</pre>
     <h2 id="gateway-request"><a class="anchor" href="#gateway-request">异步网关请求钩子</a></h2>
     <p>插件可以在 Agent 请求路由前等待外部 I/O，例如召回项目上下文。在 package.json 声明 <code>"magpie": { "hooks": "./hooks.js" }</code>，或者添加 <code>*.hooks.js</code> / <code>.mjs</code> / <code>.ts</code> / <code>.mts</code> 文件（Bun 直接运行 TypeScript，无需构建）。导出具名异步 <code>onRequest(body, ctx)</code>。纯网关插件不需要 OpenCode 的 main/exports。</p>
     <p>可选的异步 <code>onResponse(reply, ctx)</code> 在输出完成后接收尽力投递的通知，不修改回复，也不阻塞实时流。工具声明和工具循环由客户端负责。</p>
+    <p>可选的异步 <code>onSignIn(event, ctx)</code> 在订阅账号需要重新登录时收到通知：<code>event</code> 为 <code>{provider, providerName, account, state, endsAt?}</code>，<code>state</code> 是 <code>signed-out</code>，或 Claude 登录三天内到期时的 <code>ending</code>。每次失效只通知一次，直到账号恢复可用，不含任何令牌。钩子文件可以只导出 <code>onSignIn</code>。</p>
 <p>它在 Bun 中运行，每个 Agent 请求调用一次，位于 JS 网关中间件之前，对所有供应商生效，包括 Codex 自己的 ChatGPT 登录。body 是 Agent API 请求对象；ctx 包含 <code>protocol</code>、<code>model</code>、<code>stream</code>、<code>path</code>、<code>agent</code>、<code>session</code>、<code>cwd</code>、<code>query</code>、<code>options</code>、<code>signal</code>。query 是最后一条用户文本，不含工具结果和图片；缺失身份信息为空，HTTP Authorization 不传入。</p>
-<p>返回对象替换请求，undefined 保留此前请求。改动模型、流式、客户端工具或工具选择的钩子会被回滚，算作失败，这次请求不会调用它的 <code>onResponse</code>。每个钩子收到独立副本，失败或返回 undefined 时丢弃其原地修改。成功修改按启用顺序传给后续插件。每个钩子默认 1 秒；选项 <code>gatewayTimeoutMs</code> 可设为 100 到 10000 毫秒的整数。整条链按预算求和，限制为 2 到 10 秒，包含宿主启动及 RPC 共 11 秒。设置 → 插件提供选项编辑及调用次数、耗时、失败与最近结果。<code>ctx.report(code, bytes)</code> 只接受 ready/empty/unbound/unauthorized/unavailable/invalid/skipped 和字节数；不保存私有文本，重载后统计清零。fetch 应使用 <code>ctx.signal</code>。异常、畸形返回、超时、宿主正忙于启动时保留原请求。Bun 插件具有宿主权限，只安装可信代码。</p>
+<p>返回对象替换请求，undefined 保留此前请求。改动模型、流式、客户端工具或工具选择的钩子会被回滚，算作失败，这次请求不会调用它的 <code>onResponse</code>。每个钩子收到独立副本，失败或返回 undefined 时丢弃其原地修改。成功修改按启用顺序传给后续插件。每个钩子默认 1 秒；选项 <code>gatewayTimeoutMs</code> 可设为 100 到 30000 毫秒的整数，超出范围时取较近的边界。整条链按预算求和，限制为 2 到 10 秒；若最长的单个钩子超时更长，则以它为准。宿主启动最多 11 秒，启动及 RPC 共为链预算加 1 秒（至少 11 秒）。设置 → 插件提供选项编辑及调用次数、耗时、失败与最近结果。<code>ctx.report(code, bytes)</code> 只接受 ready/empty/unbound/unauthorized/unavailable/invalid/skipped 和字节数；不保存私有文本，重载后统计清零。fetch 应使用 <code>ctx.signal</code>。异常、畸形返回、超时、宿主正忙于启动时保留原请求。Bun 插件具有宿主权限，只安装可信代码。</p>
 <p>用 <code>magpie plugin add ./my-plugin</code> 安装，<code>magpie plugin options my-plugin '&lbrace;"serverUrl":"http://127.0.0.1:8000"&rbrace;'</code> 设置选项。on/off 和选项变更触发宿主重载；仅修改源码需主动触发配置重载。内部标题和分类请求跳过此钩子。</p>
 
     <h2 id="middleware"><a class="anchor" href="#middleware">网关中间件</a></h2>
@@ -863,9 +916,14 @@ claude mcp add --transport http magpie-tools http://127.0.0.1:3425/mcp/magpie/to
       <tr><td><code>icon</code></td><td>这一行的图标：图标名、<code>https://</code> 或 <code>data:</code> URL。不写就用插件自己的图标，再没有就用通用图标。</td></tr>
       <tr><td><code>notice</code></td><td>换模型之后显示的提示，和内置 Agent 一样。</td></tr>
       <tr><td><code>library</code></td><td>Agent 从哪里读<span class="ui">资源库</span>给它的东西：<code>instructions</code>（每次对话前读的 Markdown 文件）、<code>mcp</code>（它的 MCP 服务器文件）和 <code>mcpFormat</code>（这个文件的写法跟哪个 Agent 的一样：<code>alma</code>, <code>antigravity</code>, <code>claude</code>, <code>cline</code>, <code>codex</code>, <code>commandcode</code>, <code>copilot</code>, <code>crush</code>, <code>cursor</code>, <code>devin</code>, <code>gemini</code>, <code>goose</code>, <code>grok</code>, <code>hermes</code>, <code>kimi</code>, <code>omp</code>, <code>opencode</code>, <code>zed</code>；<code>claude</code> 即 <code>{"mcpServers": {…}}</code>），以及 <code>skills</code>（放 <code>SKILL.md</code> 文件夹的目录）。每项都可省略，<code>~</code> 和 <code>$VAR</code> 会展开：<code>library: { instructions: "~/.toy/AGENTS.md", mcp: "~/.toy/mcp.json", mcpFormat: "claude", skills: "~/.toy/skills" }</code>。不写的话，资源库不会给它任何东西，给它某一项时会被拒绝，并说明插件该写哪个键。</td></tr>
+      <tr><td><code>launch</code></td><td>给只从启动方式读取网关的 Agent：<code>env</code> 是启动时带上的环境变量，每个值是 <code>{key}</code>、<code>{url}</code> 或 <code>{v1}</code>，地址后最多再接一段路径；<code>model</code> 是指定模型的参数。它用着 magpie 的模型时，magpie 会在用户的 shell（zsh、bash、fish、PowerShell）里放一个以 <code>bin</code> 命名的函数，运行 <code>magpie &lt;id&gt; run</code>，让它从网关启动：<code>launch: { env: { GEMINI_API_KEY: "{key}", GOOGLE_GEMINI_BASE_URL: "{url}" }, model: "--model" }</code>。换回它自己的模型时，函数随之移除。<code>args</code> 是放在用户参数前面的参数，值都是 <code>{config}</code>，即配置文件的路径：<code>args: { "--settings": "{config}" }</code>。<code>plain</code> 是让 Agent 按原样启动、不走网关的参数（子命令或参数）：<code>plain: ["remote-control"]</code>。</td></tr>
+      <tr><td><code>base</code></td><td>给由 <code>launch.args</code> 交给 Agent 的 <code>config</code>，即配置文件是 magpie 自己的文件时：Agent 自己的设置文件。<code>connect</code> 和 <code>own</code> 会拿到解析好的 <code>base</code>，用户自己的模型写在这里，退出时整个配置文件被移除：<code>base: "~/.gemini/antigravity-cli/settings.json"</code>。</td></tr>
+      <tr><td><code>merge</code></td><td>用于 json 的 <code>config</code>：这些键路径的对象由 <code>connect</code> 返回 magpie 的成员，写在用户自己的成员旁边，移除时只移除 magpie 的：<code>merge: ["customModelsConfig.customModels"]</code>。</td></tr>
+      <tr><td><code>effort</code>, <code>wsl</code>, <code>aliases</code></td><td><code>effort: true</code> 给 Agent 加上推理强度一栏；<code>wsl: true</code> 让它在 WSL 发行版里也列出；<code>aliases</code> 是 <code>magpie &lt;名字&gt;</code> 也认的其他名字。</td></tr>
     </table></div>
     <h3>connect</h3>
-    <p><code>connect(input)</code> 返回要在模型旁边一起写入的其他键，按键路径给出各自的值；可以是 <code>async</code>。它拿到 <code>gateway</code>（<code>url</code>、<code>v1</code>——以 <code>/v1</code> 结尾的地址——和 <code>key</code>，即这个 Agent 自己的 key，请求会按它的 id 计入用量）、<code>model</code>（<code>id</code>、<code>name</code>、<code>context</code>、<code>output</code>、<code>images</code>、<code>efforts</code>，以及与 <code>/v1/models</code> 同名的 <code>native_endpoints</code>——请求不经转换直接走的网关路径，如 <code>["/v1/chat/completions"]</code>——和 <code>pricing</code>——每 token 的美元价格，十进制字符串：<code>prompt</code>、<code>completion</code>、<code>input_cache_read</code>、<code>input_cache_write</code>；不知道的就不给，绝不是空或 0）、<code>models</code>（magpie 给这个 Agent 的所有模型，格式相同）和 <code>agent</code>（<code>id</code>、<code>config</code>）。没有 <code>connect</code> 的插件只写模型。magpie 的模型有变化时会再调用一次 <code>connect</code>，它写的模型列表因此保持最新。</p>
+    <p><code>connect(input)</code> 返回要在模型旁边一起写入的其他键，按键路径给出各自的值；可以是 <code>async</code>。它拿到 <code>gateway</code>（<code>url</code>、<code>v1</code>——以 <code>/v1</code> 结尾的地址——和 <code>key</code>，即这个 Agent 自己的 key，请求会按它的 id 计入用量）、<code>model</code>（<code>id</code>、<code>name</code>、<code>context</code>、<code>output</code>、<code>images</code>、<code>efforts</code>，以及与 <code>/v1/models</code> 同名的 <code>native_endpoints</code>——请求不经转换直接走的网关路径，如 <code>["/v1/chat/completions"]</code>——和 <code>pricing</code>——每 token 的美元价格，十进制字符串：<code>prompt</code>、<code>completion</code>、<code>input_cache_read</code>、<code>input_cache_write</code>；不知道的就不给，绝不是空或 0）、<code>models</code>（magpie 给这个 Agent 的所有模型，格式相同）、<code>decisionModels</code>（magpie 的决策模型——Jev、Clef、插件标了 <code>decides</code> 的模型——以及由它们组成的路由组；它们不在 <code>models</code> 和 <code>/v1/models</code> 里。每个有 <code>id</code>、<code>name</code>、<code>provider</code> 或 <code>group: true</code>，以及 <code>endpoints</code>，即调用它的路径：<code>["/v1/systemone", "/v1/decisions"]</code>；没有时是 <code>[]</code>）和 <code>agent</code>（<code>id</code>、<code>config</code>）。没有 <code>connect</code> 的插件只写模型。magpie 的模型有变化时会再调用一次 <code>connect</code>，它写的模型列表因此保持最新。</p>
+    <p>导出 <code>own({ config, base, model })</code> 时，它给出这一行选择器里 Agent 自己的模型：拿到解析好的配置文件（没有时为 <code>{}</code>，有 <code>base</code> 时也一并给出）和 Agent 当前的模型，返回 <code>{ value, model, direct }</code> 的列表：<code>value</code> 是写入的模型值，<code>model</code> 是它在厂商那里的名字，<code>direct</code> 是它直连的厂商（<code>Google</code>、<code>OpenAI</code>、<code>Anthropic</code>）。不导出时，选择器只列出 Agent 当前的模型。</p>
     <h3>magpie 怎么用它</h3>
     <ul>
       <li><b>写入。</b>每个键原地修改，用户的注释和其他键都保留。第一次写之前，每个键原来的值会按原类型存起来（数字仍是数字）。</li>

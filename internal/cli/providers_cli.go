@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/daemon"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
@@ -47,24 +49,35 @@ const providerUsage = `usage:
                                           over its keys or accounts (fast: the one that answered fastest lately first;
                                           drain: one until it is used up, then the next, never back to an earlier one);
                                           prompt=as-written sends Antigravity the system prompt exactly as written;
-                                          prompt=default, the default, breaks up the lines Google answers with a
-                                          false 429 (Codex's, Claude Code's, Hermes' old persona) with a zero-width space
+                                          prompt=default, the default, rewords the lines Google answers with a
+                                          false 429 (Codex's, Claude Code's, Hermes' old persona, oh-my-pi's)
                                           additional-tools=on sends a tool Claude Code's tool search loads to its
                                           Responses API where it was loaded (an additional_tools item, which
                                           keeps the cache); OpenAI's API and a ChatGPT (Codex) account do so by
                                           default; additional-tools=off puts it with the other tools,
                                           additional-tools=default is magpie's
+                                          resolve.<host>=<IP>[,dns:<name>…] connects a host of its base URLs there
+                                          (curl --resolve: the URL's name stays for TLS and Host); empty takes the
+                                          host's out, resolve= clears them all
                                           image-files=off sends DeepSeek's API an agent's images inline on every
                                           turn; image-files=on, the default, uploads each once (for a day)
                                           and names it by its file id
+                                          upstream-providers=on, on a Remote magpie, names its models by the
+                                          provider serving each there (Claude · Office › RelayA); off, the
+                                          default, as that magpie's own list names them
                                           patience=2m keeps a request to it alone (not through a group) that long
                                           while it is busy or briefly rate limited, asking again after a pause
                                           (at most 4m); patience=off hands the agent the error at once;
                                           patience=default, 1m
+                                          socket=auto sends its Responses turns over the Responses WebSocket,
+                                          over HTTP when it can't, and over HTTP alone for 10m once the host
+                                          refuses it; socket=on tries it every turn; socket=off, the default
                                           errors=pass sends the agent its errors as the vendor sent them:
                                           asked once, nothing read into them, no other provider tried;
                                           errors=magpie, the default, has magpie handle them
   magpie provider key <id> <key>          change the API key
+  magpie provider keys <id> [add [key…|-]]   print every key, one a line, or add keys (as words,
+                                          or one a line on stdin), to carry them to another magpie
   magpie provider icon <id> <file|name>   give a custom provider a picture (PNG, JPEG, SVG…) or a built-in icon
   magpie provider fallback <id> <provider/model>…   where requests go when it's out of quota or down (none clears)
   magpie provider models <id> [ids…]      fetch the vendor's model list, or choose which models to expose:
@@ -87,6 +100,9 @@ const providerUsage = `usage:
   magpie provider account-cap <id> <account> --window <name> [percent|none|default]
                                           a share for one window alone (e.g. "5 hours" 50): none is no cap on it,
                                           default has it follow the account's cap
+  magpie provider account-cap <id> <account> --window <name> --amount <n|off>
+                                          a fixed amount of a window counted in a unit (e.g. "Daily credits" 300),
+                                          by the vendor's count, spending outside magpie included
   magpie provider pool <id> [--accounts a,b,…] [--cap percent|off] [--stop on|off] [--careful on|off]
                                           a subscription's accounts as one pool: which are in use and in what order,
                                           each one's cap, --stop: answer 429 at the caps rather than go on to the
@@ -98,7 +114,11 @@ const providerUsage = `usage:
                                           how much an API key may spend, in USD as the Usage page prices its calls,
                                           a day (the default), a month or in all from now: at it, routing takes the
                                           key for used up and goes on to the other keys and the fallbacks
-  magpie provider key-balance <id> [key [usd|¥cny|off] [--refill monthly[:day]|weekly[:mon…sun]|off] [--expiring amount@yyyy-mm-dd|off]… [--expiring-remove [amount@]yyyy-mm-dd]…]
+  magpie provider key-rate <id> [key [rate|default]]
+                                          the price rate one API key bills at against the official price, as a relay
+                                          bills its key groups apart (e.g. 0.5): the Usage page counts that key's calls
+                                          at it; default has it bill at the provider's rate
+  magpie provider key-balance <id> [key [usd|¥cny|off] [--refill monthly[:day]|weekly[:mon…sun]|daily|off] [--expiring amount@yyyy-mm-dd|off]… [--expiring-remove [amount@]yyyy-mm-dd]…]
                                           the balance on an API key whose vendor tells none, typed from its own page
                                           in USD or in yuan (¥100): the Usage page shows it less what magpie prices the
                                           key's calls at since; with --refill it is whole again each month or week;
@@ -129,6 +149,9 @@ const providerUsage = `usage:
                                           rest at all, while out of quota, its key refused or rate limited
                                           still rests it
   magpie provider listed <id> yes|no      no: its models serve only through routing groups, not in the list
+  magpie provider this-device <id> yes|no
+                                          yes: kept on this computer; sync neither sends it out nor lets
+                                          another computer's copy replace or remove it
   magpie provider off|on <id>             switch it off (kept, but no agent or request uses it), or on again
   magpie provider test <id> [--as codex|claude-code] [model…]
                                           send a tiny request through each endpoint, or to each model;
@@ -152,15 +175,21 @@ const providerUsage = `usage:
                                     credentials=<file> names another, a service account key too; impersonate= needs
                                     roles/iam.serviceAccountTokenCreator on that account; location= global (the
                                     default), us, eu or a region such as us-central1; set changes them, empty clears)
+       magpie provider add google-vertex AQ.Ab8R…   (Vertex AI express mode: an API key, no project or gcloud; Gemini
+                                    models only. project= beside it asks that project's address with the key;
+                                    url=https://my-proxy.example.com asks a gateway that answers as Vertex AI does)
        magpie provider add "My Decider" decide=https://decide.example.com/v1 key=sk-… models=my-decision-model
                                    (a System One API, POST …/systemone: it routes groups, its models are never an agent's)
        magpie provider add anthropic sk-… id=anthropic-ws2 name="Anthropic WS2" header.anthropic-workspace-id=wrkspc_…
        magpie provider set my-relay models.url=https://relay.example.com/api/models catalog=
        magpie provider set volcengine list=off models=ep-20261108-abcde
                                    (its model list is never asked for: only the models given by id are served)
+       magpie provider set my-relay resolve.relay.example.com=10.0.0.5,dns:gw.corp.example
+                                   (Advanced › Connect to: connects to 10.0.0.5, then gw.corp.example's
+                                    address, while TLS and Host still say relay.example.com)
        magpie provider set my-relay search=yes
-                                   (the relay answers Claude Code's WebSearch and Codex's web_search itself:
-                                    those go to it as sent, not through magpie's own search)
+                                   (the relay answers Claude Code's WebSearch and Codex's web search itself, web_search
+                                    and web.run's /alpha/search: those go to it as sent, not through magpie's search)
        magpie provider add lmstudio address=http://192.168.1.5:1234
        magpie provider set lmstudio address=192.168.1.5:1234
                                    (Ollama, LM Studio, oMLX or MLX-Serve on another port or computer: each of its
@@ -169,9 +198,20 @@ const providerUsage = `usage:
                                    (Settings' redaction leaves its requests as written, at any address: your call,
                                     so mind a relay that passes them on to a vendor; a subscription or a plugin's
                                     provider too, whose vendor gets them so; never another magpie)
+       magpie provider set claude fallback-for-others=no
+                                   (no other model's fallback, nor a routing group's next after one:
+                                    a local model that is down or full doesn't send its requests on to it)
        magpie provider set modelscope free=yes
                                    (every model of it counts as free, so a Free first routing spends it before
                                     paid ones, as a free daily quota; prices and Usage's costs stay as listed)
+       magpie provider set my-relay billing=plan
+                                   (marks it on a plan, or billing=payg pay as you go, on Providers and Routing;
+                                    billing=auto goes back to magpie's reading of its endpoints)
+       magpie provider set 100milionseek max-images=8 max-images.gemini-3-flash=10
+                                   (the most images one request to it may carry, counted over the whole
+                                    conversation: past it the oldest are left out, each replaced by a line
+                                    of text, the latest message's images kept; max-images.<model> for one
+                                    of its models; 0 or empty clears it)
        magpie provider add "My Relay" url=https://relay.example.com/v1 key=sk-… balance=https://relay.example.com/api/usage/token balance.path='$data.total_available / 500000'
        magpie provider set my-relay balance.path='(1 - credits.monthlyCredits / 70) %'
        magpie provider set my-relay balance.method=POST
@@ -205,7 +245,9 @@ func keyColumn(p provider.Provider) string {
 	case p.IsVertex() && !p.Ready():
 		// no project an address can be made of (providers.json edited
 		// by hand): nothing is asked, as the app's row says
-		return amber.Render("○ needs a project")
+		return amber.Render("○ needs a project or an API key")
+	case p.IsVertex() && p.Key != "":
+		return green.Render("●") + " " + muted.Render(provider.Mask(p.Key))
 	case p.IsVertex():
 		// no key: a token minted from the user's Google credentials,
 		// traded for a service account's when it impersonates one
@@ -513,9 +555,6 @@ func providerCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if p.IsVertex() {
-			return fmt.Errorf("%s is asked with your Google credentials, not an API key · magpie provider set %s credentials=<file> impersonate=<service account> changes them", p.Name, p.ID)
-		}
 		p.Key = rest[1]
 		if err := provider.Save(*p); err != nil {
 			return err
@@ -654,6 +693,10 @@ func providerCmd(args []string) error {
 		return keyBalanceCmd(rest)
 	case "spend-cap", "spend-caps":
 		return spendCapCmd(rest)
+	case "key-rate", "key-rates":
+		return keyRateCmd(rest)
+	case "keys":
+		return keysCmd(rest, os.Stdin, os.Stdout)
 	case "account-weight", "account-weights":
 		return accountWeightCmd(rest)
 	case "queue":
@@ -688,6 +731,25 @@ func providerCmd(args []string) error {
 			fmt.Println(green.Render("✓"), p.Name, muted.Render("serves only through routing groups"))
 		} else {
 			fmt.Println(green.Render("✓"), p.Name, muted.Render("its models are listed"))
+		}
+		return nil
+	case "this-device":
+		// yes: sync neither sends the provider out nor lets another
+		// computer's copy replace or remove it (treydtw on X)
+		if len(rest) != 2 || (rest[1] != "yes" && rest[1] != "no") {
+			return fmt.Errorf("magpie provider this-device <id> yes|no")
+		}
+		p, err := provider.Find(rest[0])
+		if err != nil {
+			return err
+		}
+		if err := provider.SetThisDevice(p.ID, rest[1] == "yes"); err != nil {
+			return err
+		}
+		if rest[1] == "yes" {
+			fmt.Println(green.Render("✓"), p.Name, muted.Render("stays on this device: sync doesn't send it out or change it"))
+		} else {
+			fmt.Println(green.Render("✓"), p.Name, muted.Render("syncs with your other computers"))
 		}
 		return nil
 	case "off", "on":
@@ -786,9 +848,6 @@ func addProvider(rest []string) error {
 	if pr, err := provider.FromPreset(strings.ToLower(rest[0])); err == nil {
 		p = pr
 		if len(rest) > 1 && !strings.Contains(rest[1], "=") {
-			if p.IsVertex() {
-				return fmt.Errorf("%s is asked with your Google credentials, not an API key · magpie provider add %s project=<your Google Cloud project's id>", p.Name, p.ID)
-			}
 			p.Key = rest[1]
 			rest = rest[2:]
 		} else {
@@ -806,7 +865,7 @@ func addProvider(rest []string) error {
 	id, err := provider.Add(p)
 	if err != nil && p.IsVertex() && (p.Vertex == nil || strings.TrimSpace(p.Vertex.Project) == "") {
 		// the pair that gives the project, which Save's words don't name
-		return fmt.Errorf("%w · magpie provider add %s project=<your Google Cloud project's id>", err, p.Preset)
+		return fmt.Errorf("%w · magpie provider add %s project=<your Google Cloud project's id>, or give an API key", err, p.Preset)
 	}
 	if err != nil {
 		return err
@@ -891,15 +950,31 @@ func showProviderAsking(p provider.Provider, ask bool) error {
 	if p.Unredacted {
 		why := "  Settings' redaction leaves its requests as written"
 		if !p.SkipsRedaction() {
-			why = "  but masked: another magpie or no address"
+			why = "  but masked: no address"
 		}
 		kv("unmasked", "yes"+muted.Render(why))
+	}
+	if p.NoStandIn {
+		kv("fallback-for-others", "no"+muted.Render("  never takes another model's request"))
+	}
+	if len(p.MaxImages) > 0 {
+		kv("max-images", maxImagesText(p.MaxImages)+muted.Render("  a request past it has its oldest images left out"))
+	}
+	switch b := p.BillingKind(); {
+	case b == "":
+	case p.Billing != "":
+		kv("billing", billingWord(b)+muted.Render("  by your word"))
+	default:
+		kv("billing", billingWord(b))
 	}
 	if p.CountFree {
 		kv("free", "yes"+muted.Render("  counted free by Free first and Cheapest routing; prices and Usage's costs stay as listed"))
 	}
 	if p.NativeCompaction {
 		kv("compaction", "native"+muted.Render("  Codex's own, sealed by the key or account that answers it"))
+	}
+	if p.Socket != "" {
+		kv("socket", p.Socket)
 	}
 	switch {
 	case p.Account != nil:
@@ -925,6 +1000,17 @@ func showProviderAsking(p provider.Provider, ask bool) error {
 		project := v.Project
 		if !p.Ready() {
 			project = amber.Render(cmp.Or(project, "not set")) + muted.Render("  magpie provider set "+p.ID+" project=…")
+		}
+		if p.Key != "" {
+			// an API key: express mode, or the project's address
+			kv("key", muted.Render(provider.Mask(p.Key)))
+			if v.BaseURL != "" {
+				kv("url", v.BaseURL)
+			}
+			if p.VertexExpress() {
+				kv("mode", "express: Gemini models, no project")
+				break
+			}
 		}
 		kv("project", project)
 		kv("location", v.Location)
@@ -974,6 +1060,9 @@ func showProviderAsking(p provider.Provider, ask bool) error {
 	cancel()
 	for _, k := range slices.Sorted(maps.Keys(p.Headers)) {
 		kv("header", k+": "+muted.Render(p.Headers[k]))
+	}
+	for _, h := range slices.Sorted(maps.Keys(p.Resolve)) {
+		kv("connect", h+muted.Render(" → ")+strings.Join(p.Resolve[h], ", "))
 	}
 	if d := p.RefreshInterval(); d > 0 {
 		kv("refresh", "every "+p.RefreshSchedule()+muted.Render("  the gateway fetches its list by itself"))
@@ -1041,11 +1130,22 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 		if !ok {
 			return fmt.Errorf("expected key=value, got %q\n\n%s", kv, providerUsage)
 		}
-		if p.IsVertex() && slices.Contains([]string{"url", "chat", "openai", "responses", "anthropic", "decide", "address"}, strings.ToLower(k)) {
+		if p.IsVertex() && slices.Contains([]string{"url", "baseurl"}, strings.ToLower(k)) {
+			// an API key's gateway: Google's token never goes there, so
+			// it is kept only with a key (Save says so)
+			x := provider.Vertex{}
+			if p.Vertex != nil {
+				x = *p.Vertex
+			}
+			x.BaseURL = strings.TrimSpace(v)
+			p.Vertex = &x
+			continue
+		}
+		if p.IsVertex() && slices.Contains([]string{"chat", "openai", "responses", "anthropic", "decide", "address"}, strings.ToLower(k)) {
 			// asked only at the address its project and location make, so
 			// that its Google token goes nowhere else: one given here would
 			// be dropped without a word
-			return fmt.Errorf("%s is asked at its Google Cloud project's own address: project= and location= say where", p.Name)
+			return fmt.Errorf("%s is asked at its Google Cloud project's own address (project= and location= say where), or at url= with an API key", p.Name)
 		}
 		switch strings.ToLower(k) {
 		case "id":
@@ -1196,11 +1296,25 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			default:
 				return fmt.Errorf("image-files=on|off, not %q", v)
 			}
+		case "upstream-providers":
+			// on: a Remote magpie's models named by the provider serving
+			// each there (Provider.UpstreamProviders, lcc580 on X)
+			if !p.IsRemoteMagpie() {
+				return fmt.Errorf("upstream-providers is a Remote magpie's; %s is not one", p.ID)
+			}
+			switch strings.ToLower(v) {
+			case "on", "yes":
+				p.UpstreamProviders = true
+			case "off", "no", "default":
+				p.UpstreamProviders = false
+			default:
+				return fmt.Errorf("upstream-providers=on|off, not %q", v)
+			}
 		case "prompt":
 			// as-written: Antigravity's subscription is sent the system
 			// prompt exactly as the agent wrote it, the lines Google turns
-			// away with a 429 included; default breaks those lines up
-			// with a zero-width space (Provider.PromptAsWritten)
+			// away with a 429 included; default rewords those lines
+			// (Provider.PromptAsWritten)
 			switch strings.ToLower(v) {
 			case "as-written", "as-sent", "on", "yes":
 				p.PromptAsWritten = true
@@ -1225,6 +1339,15 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			default:
 				return fmt.Errorf("additional-tools=on|off|default, not %q", v)
 			}
+		case "socket":
+			// its Responses turns over the Responses WebSocket magpie
+			// speaks to chatgpt.com (#5781): auto leaves a host that
+			// refuses it to HTTP for a while, on tries it every turn
+			s, ok := provider.ParseSocket(v)
+			if !ok {
+				return fmt.Errorf("socket=auto|on|off, not %q", v)
+			}
+			p.Socket = s
 		case "patience":
 			// how long a request to the provider alone is kept while it
 			// is busy, as a group's Patience (zoecats on Discord)
@@ -1269,8 +1392,9 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			p.MagpieUserAgent = !on && p.Account == nil
 		case "search":
 			// yes: the vendor searches the web by itself, a web search a
-			// client offers going to it as it was sent (a relay in front of
-			// Anthropic's or OpenAI's API)
+			// client offers going to it as it was sent, Codex's web.run
+			// (/alpha/search) too (a relay in front of Anthropic's or
+			// OpenAI's API; YIXIE233 on X)
 			if v != "yes" && v != "no" {
 				return fmt.Errorf("search=yes|no, not %q", v)
 			}
@@ -1291,11 +1415,33 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			// yes: the provider gets the requests as written, unmasked by
 			// Settings' redaction (lc, AcMilan on Discord): the user's word
 			// at any address, a subscription's or a plugin's provider's too
-			// (isee1_1), never another magpie's (provider.SkipsRedaction)
+			// (isee1_1), another magpie's too, which then masks by its own
+			// settings (provider.SkipsRedaction)
 			if v != "yes" && v != "no" {
 				return fmt.Errorf("unmasked=yes|no, not %q", v)
 			}
 			p.Unredacted = v == "yes"
+		case "max-images", "maximages":
+			// how many images one request to it may carry (#6849:
+			// 100milionseek and Coarena take 8 and refuse the ninth, and
+			// the count is over the whole conversation); past it the
+			// oldest ones are left out, the latest message's kept
+			if err := setMaxImages(p, "*", v); err != nil {
+				return err
+			}
+		case "fallback-for-others":
+			// no: never a fallback for another model, nor a routing
+			// group's next after one (sonnnnnnnnnnnna on X: a local
+			// uncensored model's request reaching a vendor that bans for
+			// it); yes, the default, again (provider.NoStandIn)
+			switch strings.ToLower(v) {
+			case "yes", "on":
+				p.NoStandIn = false
+			case "no", "off":
+				p.NoStandIn = true
+			default:
+				return fmt.Errorf("fallback-for-others=yes|no, not %q", v)
+			}
 		case "free":
 			// yes: every model of it counts as free for Free first and
 			// Cheapest routing, by the user's word (jiabubu on Discord:
@@ -1309,10 +1455,30 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			default:
 				return fmt.Errorf("free=yes|no, not %q", v)
 			}
+		case "billing":
+			// plan or payg: how the provider bills, by the user's word,
+			// marked on Providers and Routing (EV_John_Liu on X); auto:
+			// magpie's reading of it (provider.BillingKind)
+			switch strings.ToLower(v) {
+			case "plan":
+				p.Billing = provider.BillingPlan
+			case "payg", "pay-as-you-go":
+				p.Billing = provider.BillingPAYG
+			case "auto", "":
+				p.Billing = ""
+			default:
+				return fmt.Errorf("billing=plan|payg|auto, not %q", v)
+			}
 		case "context":
 			if err := setContext(p, "*", v); err != nil {
 				return err
 			}
+		case "resolve":
+			// resolve= takes every connect address out
+			if strings.TrimSpace(v) != "" {
+				return fmt.Errorf("resolve.<host>=<IP or dns:name>[,…] gives a host's connect addresses; resolve= alone clears them all, not %q", v)
+			}
+			p.Resolve = nil
 		case "family", "tag":
 			p.Family = strings.TrimSpace(v)
 		case "routing", "strategy":
@@ -1361,6 +1527,34 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 				p.Headers[name] = v
 				continue
 			}
+			if len(k) > len("resolve.") && strings.EqualFold(k[:len("resolve.")], "resolve.") {
+				// resolve.<host>=<IP or dns:name>[,…] connects the host
+				// of its base URLs to those places, as curl --resolve
+				// (quantum_lsfc on X); empty takes the host's out. Save
+				// checks the host and each place (netproxy.CheckResolve)
+				host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(k[len("resolve."):]), "."))
+				delete(p.Resolve, host)
+				var places []string
+				for pl := range strings.SplitSeq(v, ",") {
+					if pl = strings.TrimSpace(pl); pl != "" {
+						places = append(places, pl)
+					}
+				}
+				if len(places) == 0 {
+					continue
+				}
+				if p.Resolve == nil {
+					p.Resolve = map[string][]string{}
+				}
+				p.Resolve[host] = places
+				continue
+			}
+			if len(k) > len("max-images.") && strings.EqualFold(k[:len("max-images.")], "max-images.") {
+				if err := setMaxImages(p, k[len("max-images."):], v); err != nil {
+					return err
+				}
+				continue
+			}
 			if len(k) > len("context.") && strings.EqualFold(k[:len("context.")], "context.") {
 				if err := setContext(p, k[len("context."):], v); err != nil {
 					return err
@@ -1369,6 +1563,9 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			}
 			return fmt.Errorf("unknown field %q\n\n%s", k, providerUsage)
 		}
+	}
+	if p.Socket != "" && !p.TakesSocket() {
+		return fmt.Errorf("socket=%s: %s has no Responses API of its own to speak a WebSocket to; only a provider with responses= and a key can", p.Socket, p.Name)
 	}
 	if p.NativeCompaction && !p.CarriesCompaction() {
 		return fmt.Errorf("compaction=native: %s can't carry Codex's own compaction; only a provider with a Responses API (responses=), a ChatGPT account or GitHub Copilot can", p.Name)
@@ -1404,6 +1601,40 @@ func setContext(p *provider.Provider, model, v string) error {
 	return nil
 }
 
+// setMaxImages sets the most images one request to model may carry ("*"
+// for all the provider's models); empty or 0 clears it.
+func setMaxImages(p *provider.Provider, model, v string) error {
+	v = strings.TrimSpace(v)
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 || n > provider.MaxImagesLimit {
+		return fmt.Errorf("max-images: a whole number from 0 to %d, not %q (0 clears it)", provider.MaxImagesLimit, v)
+	}
+	if n == 0 {
+		delete(p.MaxImages, model)
+		return nil
+	}
+	if p.MaxImages == nil {
+		p.MaxImages = map[string]int{}
+	}
+	p.MaxImages[model] = n
+	return nil
+}
+
+// maxImagesText is a provider's MaxImages as `provider <id>` shows it: the
+// one for all its models first, then model=n.
+func maxImagesText(m map[string]int) string {
+	var out []string
+	if n := m["*"]; n > 0 {
+		out = append(out, strconv.Itoa(n))
+	}
+	for _, id := range slices.Sorted(maps.Keys(m)) {
+		if id != "*" {
+			out = append(out, id+"="+strconv.Itoa(m[id]))
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
 func ago(t time.Time) string {
 	d := time.Since(t)
 	switch {
@@ -1435,7 +1666,7 @@ func refreshLive(ctx context.Context) {
 // network by MAGPIE_ADDR (a server, a Docker image), it takes others with
 // an enabled gateway key.
 func keyNote() string {
-	if settings.Load().LAN || gateway.OnNetwork() {
+	if settings.Shared().LAN || gateway.OnNetwork() {
 		if gateway.InContainer() {
 			return "(anything works inside the container; from its host and other machines, an enabled gateway key — magpie gateway-key add <name>)"
 		}
@@ -1451,8 +1682,15 @@ func keyNote() string {
 const containerNote = "these are the container's own addresses: other machines use the host's, and MAGPIE_PUBLIC_URL=http://<host>:<port> puts it here"
 
 // containerLine is where other containers on this host reach the gateway
-// while magpie runs in one, "" when that isn't known.
+// while magpie runs in one, "" when that isn't known. In a LazyCat app on
+// the box's bridge network it says how the box's LAN address gets the
+// port, which LazyCat publishes only to its client's devices (mtoolstec
+// on X).
 func containerLine() string {
+	if gateway.LazyCatURL() != "" && !gateway.LazyCatBox() {
+		port := gateway.Port()
+		return muted.Render("  only devices with the LazyCat client reach " + gateway.LazyCatURL() + "; for the box's LAN IP on port " + port + ", forward port " + port + " to Magpie in LazyCat's LAN port forwarding app")
+	}
 	if u := gateway.ContainerHostURL(); u != "" {
 		return muted.Render("  other containers on this host ") + u
 	}
@@ -1492,6 +1730,7 @@ func advertisedURL() string {
 func serve() error {
 	s := gateway.New()
 	go stats.Run(version, "serve")
+	catalog.Seed()         // the shipped copy, when models.dev can't be reached
 	go catalog.KeepFresh() // new models' prices, in a gateway left running
 	// a signed-in account's list exists only at its vendor: asked for here
 	// as the app and the terminal ask (#1789), or a headless gateway offered
@@ -1505,6 +1744,8 @@ func serve() error {
 	// before a change and no codex session is on it
 	go agent.KeepCodexDaemonCurrent(context.Background())
 	go agent.KeepCodexRolloutsPortable(context.Background())
+	// a launch agent an older magpie wrote, brought up to date (#2961)
+	daemon.Mend()
 	public := advertisedURL()
 	fmt.Println(green.Render("●"), "magpie gateway on", bold.Render(gateway.URL()))
 	fmt.Println(muted.Render("  OpenAI  "), public+"/v1/chat/completions", muted.Render("·"), public+"/v1/responses")
@@ -1537,12 +1778,15 @@ func serve() error {
 	follow := newServeFollow(s, stop)
 	if follow != nil {
 		gateway.SetRestarter(follow.answer)
+		gateway.SetForceRestarter(follow.answerNow)
 		go follow.run(ctx)
 	}
 	// another magpie using this one updated (serve_update.go), and this
 	// one's own Remote magpies follow it
 	gateway.SetUpdater(serveUpdateAsked(follow))
 	go provider.KeepRemotesUpdated(ctx, version)
+	// the models a Remote magpie's agents are on, as the app follows them
+	go agent.KeepFollowingRemote(ctx, 30*time.Second)
 	err := s.ListenAndServe(ctx)
 	if exe := follow.restartTo(); exe != "" {
 		// the plugin hosts end, waited for, first, as magpie web's
@@ -1665,36 +1909,57 @@ func accountModelsCmd(rest []string) error {
 // accountCapCmd shows, or sets with a share or off, the usage cap of a
 // subscription's accounts: the share of each window one is used to at most
 // (provider.AccountCaps); with --window <name>, the share of that window
-// alone (provider.AccountWindowCaps).
+// alone (provider.AccountWindowCaps); with --amount too, a fixed amount of
+// that window's own unit, credits or requests (provider.AccountWindowAmounts).
 func accountCapCmd(rest []string) error {
-	usage := fmt.Errorf("magpie provider account-cap <id> [account [percent|off]]\n       magpie provider account-cap <id> <account> --window <name> [percent|none|default]")
+	usage := fmt.Errorf("magpie provider account-cap <id> [account [percent|off]]\n       magpie provider account-cap <id> <account> --window <name> [percent|none|default]\n       magpie provider account-cap <id> <account> --window <name> --amount <n|off>")
 	window, windowSet := "", false
+	amount, amountSet := "", false
 	for i := 0; i < len(rest); i++ {
 		a := rest[i]
-		if v, ok := strings.CutPrefix(a, "--window="); ok {
-			window, windowSet = v, true
-			rest = slices.Delete(slices.Clone(rest), i, i+1)
-			i--
-			continue
-		}
-		if a == "--window" {
-			if i+1 >= len(rest) {
-				return usage
+		for _, f := range []struct {
+			name string
+			v    *string
+			set  *bool
+		}{{"--window", &window, &windowSet}, {"--amount", &amount, &amountSet}} {
+			if v, ok := strings.CutPrefix(a, f.name+"="); ok {
+				*f.v, *f.set = v, true
+				rest = slices.Delete(slices.Clone(rest), i, i+1)
+				i--
+				break
 			}
-			window, windowSet = rest[i+1], true
-			rest = slices.Delete(slices.Clone(rest), i, i+2)
-			i--
+			if a == f.name {
+				if i+1 >= len(rest) {
+					return usage
+				}
+				*f.v, *f.set = rest[i+1], true
+				rest = slices.Delete(slices.Clone(rest), i, i+2)
+				i--
+				break
+			}
 		}
 	}
-	if len(rest) < 1 || windowSet && (len(rest) < 2 || strings.TrimSpace(window) == "") {
+	if len(rest) < 1 || windowSet && (len(rest) < 2 || strings.TrimSpace(window) == "") || amountSet && (!windowSet || len(rest) != 2) {
 		return usage
 	}
 	p, err := provider.Find(rest[0])
 	if err != nil {
 		return err
 	}
-	if p.Account == nil {
-		return fmt.Errorf("%s has keys, not subscription accounts with usage windows to cap", p.Name)
+	if !p.TakesUsageCap() {
+		return fmt.Errorf("%s has keys with no usage windows magpie reads, not subscription accounts with windows to cap", p.Name)
+	}
+	if amountSet {
+		n, err := parseWindowAmount(amount)
+		if err != nil {
+			return err
+		}
+		if err := provider.SetWindowAmount(p.ID, rest[1], []string{window}, n); err != nil {
+			return err
+		}
+		if p, err = provider.Find(p.ID); err != nil {
+			return err
+		}
 	}
 	if len(rest) > 2 {
 		if windowSet {
@@ -1736,7 +2001,7 @@ func accountCapCmd(rest []string) error {
 		caps := p.CapsOf(r)
 		if caps.All > 0 {
 			fmt.Printf("%s · capped at %d%% of each usage window\n", r, caps.All)
-		} else if len(caps.Windows) > 0 {
+		} else if len(caps.Windows) > 0 || len(caps.Amounts) > 0 {
 			fmt.Println(r, muted.Render("· no cap on its other windows: used to 100%"))
 		} else {
 			fmt.Println(r, muted.Render("· no cap: used to 100%"))
@@ -1748,8 +2013,25 @@ func accountCapCmd(rest []string) error {
 				fmt.Printf("  %s · capped at %d%%\n", w, c)
 			}
 		}
+		for _, w := range slices.Sorted(maps.Keys(caps.Amounts)) {
+			fmt.Printf("  %s · capped at %s of its unit\n", w, strconv.FormatFloat(caps.Amounts[w], 'f', -1, 64))
+		}
 	}
 	return nil
+}
+
+// parseWindowAmount reads a window's fixed amount as the CLI takes it: a
+// number above 0, "300" or "1,000", or off (0) to lift it.
+func parseWindowAmount(s string) (float64, error) {
+	t := strings.ToLower(strings.TrimSpace(s))
+	if t == "off" || t == "none" || t == "default" || t == "0" {
+		return 0, nil
+	}
+	n, err := strconv.ParseFloat(strings.ReplaceAll(t, ",", ""), 64)
+	if err != nil || !(n > 0) || math.IsInf(n, 0) {
+		return 0, fmt.Errorf("a window's amount is a number above 0, in the window's own unit, or off, not %q", s)
+	}
+	return n, nil
 }
 
 // parseWindowCap reads a window's own share as the CLI takes it: "50",
@@ -2339,4 +2621,17 @@ func patienceArg(v string) (int, error) {
 		return 0, fmt.Errorf("patience is at most %s, not %q", provider.PatienceLongest*time.Second, v)
 	}
 	return int((d + time.Second - 1) / time.Second), nil
+}
+
+// billingWord is how a provider bills, in words (provider.BillingKind).
+func billingWord(b string) string {
+	switch b {
+	case provider.BillingPlan:
+		return "plan"
+	case provider.BillingPAYG:
+		return "pay as you go"
+	case provider.BillingMixed:
+		return "plan and pay as you go"
+	}
+	return b
 }

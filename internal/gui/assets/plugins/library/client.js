@@ -23,6 +23,7 @@ magpie.plugin("library", (ctx) => {
   let addingSet = false; // a new set being named
   let removingSet = null; // a set whose Remove was clicked once
   const extras = {};     // agent → its own additions as typed, while not saved
+  const projTexts = {};  // project dir → its own instructions as typed, while not saved
   const open = new Set(); // agents whose instructions row is open
   let probe = null;      // skills found at a source: { source, candidates, pick:Set, agents:Set }
   let probing = false;
@@ -35,6 +36,8 @@ magpie.plugin("library", (ctx) => {
 
   const GLYPH = {
     cmd: "M3 4.5h10v7H3z M5.5 7l1.5 1.2-1.5 1.3 M8.5 9.5h2",
+    // two arrows closing on a line: billion-context folding a context
+    fold: "M8 2v4 M6 4.2 8 6l2-1.8 M8 14v-4 M6 11.8 8 10l2 1.8 M3 8h10",
     web: "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11z M2.5 8h11 M8 2.5c1.6 1.7 2.3 3.5 2.3 5.5S9.6 11.8 8 13.5 M8 2.5C6.4 4.2 5.7 6 5.7 8s.7 3.8 2.3 5.5",
     skill: "M4 2.5h6.5L12 4v9.5H4z M6 6h4 M6 8.5h4 M6 11h2.5",
     doc: "M4 2.5h5.5L12 5v8.5H4z M9.5 2.5V5H12",
@@ -47,9 +50,13 @@ magpie.plugin("library", (ctx) => {
     key: "M10 2.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4z M7.8 8.2 3 13 M4.5 11.5 6 13",
     person: "M8 3a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z M3.5 13.5c.6-2.4 2.3-3.6 4.5-3.6s3.9 1.2 4.5 3.6",
     back: "m9.5 4.5-3 3.5 3 3.5",
+    // an arrow turning back: a skill going back where it came from
+    putBack: "M6 3.5 3 6.5l3 3 M3 6.5h6.5a3.5 3.5 0 0 1 0 7H7",
     hook: "M10.5 2.5v6.5a3 3 0 0 1-6 0V7.5 M3 9l1.5-1.5L6 9",
     // a person with a second, smaller one it hands work to
     subagent: "M6 3a2.2 2.2 0 1 0 0 4.4A2.2 2.2 0 0 0 6 3z M2 13c.5-2.2 2-3.4 4-3.4s3.5 1.2 4 3.4 M11.5 7.5a1.5 1.5 0 1 0 0 .01 M10.2 12.5c.3-1.3 1.1-2 2.3-2s1.6.5 1.9 1.4",
+    // a slash in a key, as a command is typed
+    command: "M4.5 3h7A1.5 1.5 0 0 1 13 4.5v7a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 11.5v-7A1.5 1.5 0 0 1 4.5 3z M9.6 5.4l-3.2 5.2",
     // a clock with an arrow going back round it, as macOS draws backups
     backup: "M3.2 8a4.8 4.8 0 1 0 1.4-3.4 M2.8 2.6v2.4h2.4 M8 5.3V8l1.9 1.2",
     power: "M8 2.5v5 M4.7 4.6a4.8 4.8 0 1 0 6.6 0",
@@ -282,17 +289,29 @@ magpie.plugin("library", (ctx) => {
   function agentChips(all, on, onChange, opts = {}) {
     on ||= [];
     const box = el("div", "lib-agents");
-    box.style.setProperty("--lib-agent-count", all.length);
+    // a row's profiles of one agent (hermes#coder, omp#work…) are one chip
+    // that opens a menu of them, not one icon each (Yanzhongixuy on X: 20
+    // Hermes glyphs in a row)
+    const fams = onChange.rows ? profileFamilies(all) : new Map();
+    const shown = [], made = new Set();
+    for (const a of all) {
+      const f = familyOf(a.id);
+      if (!fams.has(f)) shown.push({ a });
+      else if (!made.has(f)) { made.add(f); shown.push({ family: f, members: fams.get(f) }); }
+    }
+    box.style.setProperty("--lib-agent-count", shown.length);
     // the row it is put in says so (.with-agents), for its name's room:
     // Safari before 15.4 has no :has(). Every caller appends it at once.
     queueMicrotask(() => box.parentElement?.classList.contains("lib-row") && box.parentElement.classList.add("with-agents"));
-    for (const [i, a] of all.entries()) {
+    for (const [i, g] of shown.entries()) {
+      if (g.family) { box.append(profileChip(g, i, shown.length, all, on, onChange, opts)); continue; }
+      const a = g.a;
       const always = opts.always?.(a) || "";
       const has = on.includes(a.id) || !!always;
       const c = el("button", "lib-ag" + (has ? " on" : "") + (always ? " always" : ""));
       c.dataset.agent = a.id;
       // how many chips are to its right, how far it slides into the hand
-      c.style.setProperty("--k", all.length - 1 - i);
+      c.style.setProperty("--k", shown.length - 1 - i);
       c.append(agentIcon(a.icon));
       if (opts.names) c.append(el("span", "n", a.name));
       const problem = !always && opts.problems?.[a.id];
@@ -328,8 +347,74 @@ magpie.plugin("library", (ctx) => {
       };
       box.append(c);
     }
-    if (opts.all) allChip(box, all, on, onChange);
+    if (opts.all) allChip(box, all, on, onChange, opts);
     return box;
+  }
+
+  // The agent a profile belongs to: hermes#coder and hermes are Hermes,
+  // omp#work@wsl:Ubuntu and omp@wsl:Ubuntu are omp in that distro.
+  const familyOf = (id) => id.replace(/#[^@]*/, "");
+  // Three or more of an agent's own and its profiles are one chip; fewer
+  // fit the row as they are.
+  function profileFamilies(all) {
+    const by = new Map();
+    for (const a of all) {
+      const f = familyOf(a.id);
+      if (!by.has(f)) by.set(f, []);
+      by.get(f).push(a);
+    }
+    for (const [f, ms] of [...by]) if (ms.length < 3 || !ms.some((a) => a.id !== f)) by.delete(f);
+    return by;
+  }
+  // The agents a chip stands for: its own, or the profiles of a group.
+  const idsOf = (x) => x.dataset.members ? x.dataset.members.split("\t") : x.dataset.agent ? [x.dataset.agent] : [];
+  const isChip = (x) => !!(x.dataset.agent || x.dataset.members);
+  const memberOn = (x) => x.dataset.members ? (x.dataset.lit ? x.dataset.lit.split("\t") : []) : x.getAttribute("aria-pressed") === "true" ? [x.dataset.agent] : [];
+  // A group's chip: lit when any profile has the item, dashed while only
+  // some do, with how many in the corner.
+  function paintProfiles(c, lit) {
+    const n = lit.length, total = idsOf(c).length - (c.dataset.fixed ? c.dataset.fixed.split("\t").length : 0);
+    c.dataset.lit = lit.join("\t");
+    const has = n > 0 || !!c.dataset.fixed;
+    c.classList.toggle("on", has);
+    c.classList.toggle("some", n > 0 && n < total);
+    c.setAttribute("aria-pressed", has ? "true" : "false");
+    const k = c.querySelector(":scope > .cnt");
+    if (k) k.textContent = n + (c.dataset.fixed ? c.dataset.fixed.split("\t").length : 0) || "";
+  }
+  function profileChip(g, i, count, all, on, onChange, opts) {
+    const ms = g.members, main = ms.find((a) => a.id === g.family) || ms[0];
+    const always = new Map(ms.map((a) => [a.id, opts.always?.(a) || ""]).filter(([, w]) => w));
+    const fixed = ms.filter((a) => always.has(a.id) || a.unseen).map((a) => a.id);
+    const lit = ms.filter((a) => on.includes(a.id) && !fixed.includes(a.id)).map((a) => a.id);
+    const name = main.id === g.family ? main.name : main.name.split(" · ")[0];
+    const c = el("button", "lib-ag profiles");
+    c.dataset.members = ms.map((a) => a.id).join("\t");
+    c.dataset.fixed = fixed.join("\t");
+    c.style.setProperty("--k", count - 1 - i);
+    c.append(agentIcon(main.icon));
+    if (opts.names) c.append(el("span", "n", name));
+    c.append(el("span", "cnt"));
+    paintProfiles(c, lit);
+    const problems = ms.filter((a) => opts.problems?.[a.id]);
+    if (problems.length) c.classList.add("warn");
+    c.setAttribute("aria-haspopup", "menu");
+    c.title = problems.length ? name + ": " + problems.map((a) => a.name + ": " + opts.problems[a.id]).join("\n") : name;
+    c.onclick = (e) => {
+      e.stopPropagation();
+      const me = e.currentTarget;
+      const pick = ms.filter((a) => !fixed.includes(a.id) && !opts.blocked?.(a));
+      const stuck = ms.filter((a) => !fixed.includes(a.id) && opts.blocked?.(a) && memberOn(me).includes(a.id)).map((a) => a.id);
+      const menu = [{ v: "\x00" + g.family, group: pick.map((a) => a.id), name, literalName: true, note: "" },
+        ...pick.map((a) => ({ v: a.id, name: a.name, literalName: true, note: "", title: opts.problems?.[a.id] || "" }))];
+      openProtoMenu(me, menu, memberOn(me).filter((id) => !stuck.includes(id)), (next) => {
+        const now = [...stuck, ...next.filter((id) => pick.some((a) => a.id === id))];
+        paintProfiles(me, now);
+        const litAll = litOf(me.parentElement);
+        onChange([...keptOf(me.parentElement, all, on), ...litAll], me);
+      }, name, "", "left", true);
+    };
+    return c;
   }
 
   // cannot says a chip's agent can't be given the item, or has it whatever
@@ -339,13 +424,14 @@ magpie.plugin("library", (ctx) => {
   // The agents a row's chips have lit by a click: not one lit because it
   // has the item whatever is ticked.
   function litOf(box) {
-    return [...box.children].filter((x) => x.dataset.agent && !x.classList.contains("always") && !x.classList.contains("unseen") && x.getAttribute("aria-pressed") === "true").map((x) => x.dataset.agent);
+    return [...box.children].filter((x) => isChip(x) && !x.classList.contains("always") && !x.classList.contains("unseen")).flatMap(memberOn);
   }
   // What a click leaves as it was: an agent not shown, one that has the
   // item whatever is ticked, whose chip can't be clicked, and one in a
   // stopped distro magpie can't show the ticks of (unseen).
   function keptOf(box, all, on) {
-    const fixed = [...box.children].filter((x) => x.classList.contains("always") || x.classList.contains("unseen")).map((x) => x.dataset.agent);
+    const fixed = [...box.children].filter((x) => x.classList.contains("always") || x.classList.contains("unseen")).map((x) => x.dataset.agent)
+      .concat([...box.children].flatMap((x) => x.dataset.fixed ? x.dataset.fixed.split("\t") : []));
     return on.filter((id) => !all.some((x) => x.id === id) || fixed.includes(id));
   }
 
@@ -356,8 +442,8 @@ magpie.plugin("library", (ctx) => {
   // choose the agents before an item is added (installing skills, adding or
   // bringing in servers) have it too (#1531): most start with every agent
   // lit, and one agent alone was a click on each of the others.
-  function allChip(box, all, on, onChange) {
-    const can = [...box.children].filter((c) => !cannot(c) && !c.classList.contains("gone")).map((c) => c.dataset.agent);
+  function allChip(box, all, on, onChange, opts = {}) {
+    const can = [...box.children].filter((c) => !cannot(c) && !c.classList.contains("gone")).flatMap((c) => c.dataset.members ? idsOf(c).filter((id) => !c.dataset.fixed?.split("\t").includes(id) && !opts.blocked?.(all.find((a) => a.id === id))) : [c.dataset.agent]);
     if (can.length < 2) return;
     const c = el("button", "lib-ag all", t("All"));
     c.dataset.all = "1";
@@ -376,7 +462,9 @@ magpie.plugin("library", (ctx) => {
     const c = box.querySelector(":scope > .lib-ag.all");
     if (!c) return;
     const can = [...box.children].filter((x) => x.dataset.agent && !cannot(x) && !x.classList.contains("gone"));
-    const n = can.length, full = can.every((x) => x.getAttribute("aria-pressed") === "true");
+    const groups = [...box.children].filter((x) => x.dataset.members);
+    const n = can.length + groups.reduce((k, g) => k + idsOf(g).length - (g.dataset.fixed ? g.dataset.fixed.split("\t").length : 0), 0);
+    const full = can.every((x) => x.getAttribute("aria-pressed") === "true") && groups.every((g) => g.dataset.lit.split("\t").filter(Boolean).length === idsOf(g).length - (g.dataset.fixed ? g.dataset.fixed.split("\t").length : 0));
     c.classList.toggle("on", full);
     c.setAttribute("aria-pressed", full ? "true" : "false");
     c.title = full ? t("Every agent that can take it has it — click to take it from all {n}", { n }) : t("Give it to all {n} agents that can take it", { n });
@@ -394,10 +482,14 @@ magpie.plugin("library", (ctx) => {
   const writing = new Map(); // path + name → { list, name, want, box } while a row's agents are written
   let refused = 0;           // when a row's write last failed, whose error another row's "Written" doesn't cover
   function chipsChange(path, name, list, rowOf) {
-    return async (next, c) => {
+    const go = async (next, c) => {
       // All lights or darkens every chip of the row, a chip only itself
       const every = !!c.dataset.all;
-      for (const x of every ? [...c.parentElement.children].filter((y) => y.dataset.agent && !y.classList.contains("always")) : [c]) {
+      for (const x of every ? [...c.parentElement.children].filter((y) => isChip(y) && !y.classList.contains("always")) : [c]) {
+        if (x.dataset.members) {
+          paintProfiles(x, idsOf(x).filter((id) => next.includes(id) && !x.dataset.fixed?.split("\t").includes(id)));
+          continue;
+        }
         const on = next.includes(x.dataset.agent);
         x.classList.toggle("on", on);
         if (on || x === c) x.classList.remove("via");
@@ -435,12 +527,14 @@ magpie.plugin("library", (ctx) => {
       if (!me.box.isConnected) { if (failed) render(); } // drawn again meanwhile, from the clicks
       else if (fresh && !morphChips(me.box, fresh)) me.box.replaceWith(fresh);
     };
+    go.rows = true; // its chips are a row's: an agent's profiles go into one
+    return go;
   }
   // What All did, said of the item: on for how many of the agents it went
   // to, and which of them couldn't be given it, and why.
   function reportAll(v, me) {
-    const what = ({ servers: "mcp:", hooks: "hook:", subagents: "subagent:" }[me.list] || "skill:") + me.name;
-    const shown = [...me.box.children].filter((x) => x.dataset.agent && !cannot(x)).map((x) => x.dataset.agent);
+    const what = ({ servers: "mcp:", hooks: "hook:", env: "env:", subagents: "subagent:", commands: "command:" }[me.list] || "skill:") + me.name;
+    const shown = [...me.box.children].filter((x) => isChip(x) && !cannot(x)).flatMap((x) => idsOf(x).filter((id) => !x.dataset.fixed?.split("\t").includes(id)));
     const n = shown.filter((id) => me.want.includes(id)).length;
     const bad = (v.result?.problems || []).filter((p) => p.what === what && shown.includes(p.agent));
     if (!bad.length) {
@@ -484,9 +578,11 @@ magpie.plugin("library", (ctx) => {
   }
   function morphChips(box, fresh) {
     const was = [...box.children], now = [...fresh.children];
-    if (was.length !== now.length || was.some((c, i) => c.dataset.agent !== now[i].dataset.agent)) return false;
+    const key = (c) => c.dataset.agent || c.dataset.members;
+    if (was.length !== now.length || was.some((c, i) => key(c) !== key(now[i]))) return false;
     was.forEach((c, i) => {
       const n = now[i];
+      if (n.dataset.members) { c.dataset.lit = n.dataset.lit; c.dataset.fixed = n.dataset.fixed; c.querySelector(":scope > .cnt")?.replaceWith(n.querySelector(":scope > .cnt").cloneNode(true)); }
       c.className = n.className;
       c.title = n.title;
       if (cannot(n)) c.setAttribute("aria-disabled", "true"); else c.removeAttribute("aria-disabled");
@@ -509,6 +605,7 @@ magpie.plugin("library", (ctx) => {
   // the glance left out, so the others aren't drawn again for it.
   async function load(quiet) {
     let glanced = false;
+    readFollow();
     if (!lib) {
       renderLoading();
       const at = taken;
@@ -533,8 +630,10 @@ magpie.plugin("library", (ctx) => {
       // opening the page (its nav clicked, while on it too) draws it again
       // only for a change, or for RTK's tab, which is asked again: a page
       // drawn over again replaced the row under the reader's pointer (#3099)
-      if (quiet === "open" && seen(lib) === was && tab !== "rtk" && page.querySelector(":scope > .lib-body")) return;
+      if (quiet === "open" && seen(lib) === was && tab !== "rtk" && tab !== "bili" && page.querySelector(":scope > .lib-body")) return;
       rtk = null; // asked again when its tab is drawn: an agent may have been installed since
+      bili = null;
+      piView = null;
       render();
     } catch (e) {
       status(e.message, "err");
@@ -583,6 +682,28 @@ magpie.plugin("library", (ctx) => {
   // agent written that isn't one of them had it taken out (#332).
   function report(res, done, given) {
     if (!res) return;
+    // subagents imported from a repository (subagent_import.go)
+    const sa = res.subagents;
+    if (sa) {
+      const n = sa.added?.length || 0, parts = [];
+      if (n) parts.push(n === 1 ? t("1 subagent imported") : t("{count} subagents imported", { count: n }));
+      if (sa.updated?.length) parts.push(t("updated: {names}", { names: sa.updated.join(", ") }));
+      if (sa.had?.length) parts.push(t("already in the library: {names}", { names: sa.had.join(", ") }));
+      if (sa.kept?.length) parts.push(t("changed here, left as they are: {names}", { names: sa.kept.join(", ") }));
+      const warn = res.problems?.length;
+      if (warn) { const p = res.problems[0]; parts.push(t("{agent}: {error}", { agent: tilde(nameOf(p.agent)), error: p.error })); }
+      status(parts.join(" · "), warn ? "warn" : "ok", warn ? 10000 : 6000);
+      return;
+    }
+    // slash commands imported from the agents (command_import.go)
+    const ci = res.commands;
+    if (ci) {
+      const n = (ci.added?.length || 0) + (ci.joined?.length || 0), parts = [n === 1 ? t("1 slash command imported") : t("{count} slash commands imported", { count: n })];
+      const warn = res.problems?.length;
+      if (warn) { const p = res.problems[0]; parts.push(t("{agent}: {error}", { agent: tilde(nameOf(p.agent)), error: p.error })); }
+      status(parts.join(" · "), warn ? "warn" : "ok", warn ? 10000 : 6000);
+      return;
+    }
     // an update that found its source without the skill: said so, not
     // as done or failed (スライム on Discord)
     if (res.gone?.length) {
@@ -611,7 +732,7 @@ magpie.plugin("library", (ctx) => {
     }
     const n = res.changed?.length || 0;
     const out = given ? (res.changed || []).filter((id) => !given.includes(id)).length : 0;
-    if (done) status(done, "ok");
+    if (done) status(typeof done === "function" ? done(res) : done, "ok");
     else if (out && out === n) status(n === 1 ? t("Removed from {agent}", { agent: nameOf(res.changed[0]) }) : t("Removed from {n} agents", { n }), "ok");
     else if (out) status(t("{n} agents updated", { n }), "ok");
     else if (n) status(n === 1 ? t("Written to {agent}", { agent: nameOf(res.changed[0]) }) : t("Written to {n} agents", { n }), "ok");
@@ -698,7 +819,7 @@ magpie.plugin("library", (ctx) => {
       ul.append(li);
     }
     if (ul.childElementCount) card.append(ul);
-    const tabNames = { instructions: t("Instructions"), mcp: t("MCP servers"), skills: t("Skills"), hooks: t("Hooks"), subagents: t("Subagents") };
+    const tabNames = { instructions: t("Instructions"), mcp: t("MCP servers"), skills: t("Skills"), hooks: t("Hooks"), env: t("Environment variables"), subagents: t("Subagents"), commands: t("Slash commands"), plugins: t("Claude plugins") };
     const others = Object.keys(away).filter((k) => k in tabNames);
     if (others.length) {
       const more = el("div", "lib-problems-away");
@@ -734,7 +855,7 @@ magpie.plugin("library", (ctx) => {
   }
   // the tab a problem is about; "" is one shown on every tab
   function problemTab(what) {
-    return { instructions: "instructions", mcp: "mcp", skill: "skills", skills: "skills", project: "skills", hook: "hooks", hooks: "hooks", subagent: "subagents" }[what.split(":")[0]] || "";
+    return { instructions: "instructions", mcp: "mcp", skill: "skills", skills: "skills", project: "skills", hook: "hooks", hooks: "hooks", env: "env", subagent: "subagents", command: "commands", plugin: "plugins" }[what.split(":")[0]] || "";
   }
   function problemWhat(what) {
     const [kind, ...rest] = what.split(":");
@@ -744,6 +865,7 @@ magpie.plugin("library", (ctx) => {
     if (kind === "skill") return t("Skill {name}", { name });
     if (kind === "hook") return t("Hook {name}", { name });
     if (kind === "subagent") return t("Subagent {name}", { name });
+    if (kind === "command") return t("Slash command {name}", { name: "/" + name });
     if (kind === "project") return name ? t("Skill {name}", { name }) : t("The project");
     return what;
   }
@@ -807,8 +929,12 @@ magpie.plugin("library", (ctx) => {
       ch.append(bar("26px", 26, "lib-sk-icon"), bar("150px", 11));
       card.append(ch, rows(1, false).firstChild);
       box.append(card, head("60px"), rows(6, true));
-    } else if (which === "rtk") {
-      box.append(rows(1, false), head("60px"), rows(5, true));
+    } else if (which === "rtk" || which === "bili") {
+      box.append(rows(1, false), head("60px"), rows(which === "rtk" ? 5 : 3, true));
+    } else if (which === "memory") {
+      box.append(rows(1, true), rows(6, false));
+    } else if (which === "pi") {
+      box.append(head("60px"), rows(4, true));
     } else {
       box.append(rows(5, true));
     }
@@ -821,6 +947,12 @@ magpie.plugin("library", (ctx) => {
     // RTK's count read afresh each time its tab is opened: an agent run
     // since adds to it (#741); the page keeps the last one until then
     if (id === "rtk" && rtk) loadRTK();
+    // and which agents have billion-context's plugin: bili switched outside magpie
+    if (id === "bili" && bili) loadBili();
+    // Pi's extensions too: one installed or changed outside magpie since
+    if (id === "pi" && piView) loadPi();
+    // memory too: agents save to it while the page is open
+    if (id === "memory" && mem) loadMemory();
     if (!lib) return page.querySelector(":scope > .lib-skel")?.replaceWith(skeleton(id));
     render(); syncLists();
   }
@@ -832,11 +964,17 @@ magpie.plugin("library", (ctx) => {
     const n = (k) => (counts?.[k] ? " · " + counts[k] : "");
     const tabs = segs(agentless() ? [["mcp", t("MCP servers") + n("mcp")]] : [
       ["instructions", t("Instructions")],
+      ["memory", t("Memory")],
       ["mcp", t("MCP servers") + n("mcp")],
       ["skills", t("Skills") + n("skills")],
       ["hooks", t("Hooks") + n("hooks")],
+      ["env", t("Environment variables") + n("env")],
       ["subagents", t("Subagents") + n("subagents")],
+      ["commands", t("Slash commands") + n("commands")],
+      ["plugins", t("Claude plugins") + n("plugins")],
       ["rtk", "RTK"],
+      ["bili", "billion-context"],
+      ...(hasPi() ? [["pi", t("Pi packages")]] : []),
     ], tab, openTab);
     tabs.classList.add("lib-tabs");
     head.append(tabs);
@@ -885,12 +1023,18 @@ magpie.plugin("library", (ctx) => {
     const top = page.scrollTop;
     const focus = document.activeElement?.dataset?.lib; // keep the caret where the reader is typing
     const caret = focus ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
+    // an editor open before is open still, not opened again: drawn anew
+    // it would fade and slide in on every render, which a poll's made a
+    // jitter every 2s (Nietzsche_Li on X)
+    const had = new Set([...page.querySelectorAll(".lib-detail[data-detail]")].map((d) => d.dataset.detail));
     page.replaceChildren();
     fits = [];
     // the MCP servers alone with no agent to write to; the tab the reader
     // last picked is kept for when there is one
     if (agentless()) tab = "mcp";
-    const head = libHead({ mcp: lib.servers.length, skills: lib.skills.length, hooks: (lib.hooks || []).length, subagents: (lib.subagents || []).length });
+    // Pi's tab only while a Pi is here; the pick is kept for when one is
+    else if (tab === "pi" && !hasPi()) tab = "instructions";
+    const head = libHead({ mcp: lib.servers.length, skills: lib.skills.length, hooks: (lib.hooks || []).length, env: (lib.env || []).length, subagents: (lib.subagents || []).length, commands: (lib.commands || []).length, plugins: (lib.plugins || []).length });
     page.append(head);
     head.classList.toggle("stuck", top > 0);
     // what changed in a tab is drawn in place: only another tab (or the
@@ -899,14 +1043,23 @@ magpie.plugin("library", (ctx) => {
     if (problems) page.append(problems);
     const body = el("div", "lib-body" + (shown !== tab ? " enter" : ""));
     shown = tab;
+    const fnote = followNote();
+    if (fnote) body.append(fnote);
     if (tab === "instructions") renderInstructions(body);
     else if (tab === "mcp") renderServers(body);
     else if (tab === "rtk") renderRTK(body);
+    else if (tab === "bili") renderBili(body);
+    else if (tab === "memory") renderMemory(body);
+    else if (tab === "pi") renderPi(body);
     else if (tab === "hooks") renderHooks(body);
+    else if (tab === "env") renderEnv(body);
     else if (tab === "subagents") renderSubagents(body);
+    else if (tab === "commands") renderCommands(body);
+    else if (tab === "plugins") renderPlugins(body);
     else renderSkills(body);
     page.append(body);
-    for (const n of body.querySelectorAll(".row-head .note")) n.title = n.textContent;
+    for (const n of body.querySelectorAll(".row-head .note")) if (!n.closest(".fold")) n.title = n.textContent;
+    for (const d of page.querySelectorAll(".lib-detail[data-detail]")) if (had.has(d.dataset.detail)) d.classList.add("kept");
     for (const f of fits.splice(0)) f();
     page.scrollTop = top;
     syncLists(); // a long list's rows where the view is, before it's painted
@@ -924,6 +1077,620 @@ magpie.plugin("library", (ctx) => {
   }
 
   function intro(text) { return el("p", "lib-intro", text); }
+
+  // A computer that follows the server (Settings → Sync → This computer)
+  // has what it changes in the Library replaced by the next sync: said
+  // above the tabs the sync carries, with the way to that setting (a
+  // report on X: a skill added here was taken for deleted by the update).
+  let follow = null; // davsync's view, while this computer follows
+  async function readFollow() {
+    let v = null;
+    try { v = await api("davsync"); } catch {}
+    const was = follow;
+    follow = v && v.on && v.followServer ? { library: !!v.library, memory: !!v.memory } : null;
+    if (JSON.stringify(follow) !== JSON.stringify(was) && lib && page.isConnected) render();
+  }
+  function followNote() {
+    const part = tab === "memory" ? "memory" : ["instructions", "mcp", "skills", "hooks", "env", "subagents", "commands", "plugins"].includes(tab) ? "library" : "";
+    if (!part || !follow?.[part]) return null;
+    const p = el("p", "lib-intro lib-follow", t("This computer follows the server: what you change here is replaced by the next sync.") + " ");
+    const go = button(t("Sync settings"), "link", (e) => openSettingsAt(e, "sync", "#syncList .sync-follows"));
+    p.append(go);
+    return p;
+  }
+
+  // ---------- memory ----------
+
+  // What the agents know about the user and their projects, shared by all
+  // of them (internal/memory): agents search it and save to it through the
+  // Magpie Memory server, and the ones ticked for instructions read its
+  // digest. A memory an agent only guessed waits under Suggested until the
+  // user keeps it.
+  let mem = null;        // /api/memory
+  let dist = null;       // /api/memory/distill: conversations read into memory
+  let distPoll = 0;
+  let sem = null;        // /api/memory/semantic: search by meaning (memembed)
+  let semPoll = 0;
+  let memRank = null;    // {q, status, ids}: the search's ranking by meaning, best first
+  let rankT = 0;
+  let memLoading = false;
+  let memQ = "";         // the search typed
+  let memStatus = "active";
+  let memScope = "";     // "" every scope
+  let memOpen = null;    // the memory open to edit, or "new"
+  let memDraft = null;   // its fields as typed
+  let memRemoving = null; // the memory whose Delete was clicked once
+  // Select (RealZeroP27 on X): a box on each memory shown, and a bar that
+  // keeps, archives, restores or deletes the ones picked at once
+  let memPicking = false;
+  const memPicked = new Set(); // ids
+  let memAnchor = null;  // the one picked or unpicked last: a Shift-click's range starts there
+  let memSure = false;   // the bar's Delete was clicked once
+  let memShown = [];     // the memories listed, in their order
+  const MEM_KINDS = ["profile", "preference", "rule", "reference", "fact", "procedure", "episode"];
+  const kindName = (k) => ({ profile: t("About you"), preference: t("Preference"), rule: t("Rule"), reference: t("Reference"), fact: t("Fact"), procedure: t("How-to"), episode: t("Decision") })[k] || k;
+  function scopeName(s) {
+    if (!s || s === "global") return t("Everywhere");
+    if (s.startsWith("project:")) {
+      const k = s.slice(8), p = mem?.projects?.[k];
+      return p?.name || k;
+    }
+    if (s.startsWith("agent:")) return t("Only {agent}", { agent: nameOf(s.slice(6)) });
+    return s;
+  }
+  async function loadMemory() {
+    if (memLoading) return;
+    memLoading = true;
+    try {
+      [mem, dist, sem] = await Promise.all([api("memory"), api("memory/distill").catch(() => null), api("memory/semantic").catch(() => null)]);
+    } catch (e) {
+      status(e.message, "err");
+    }
+    memLoading = false;
+    if (tab === "memory" && mem) render();
+    distWatch();
+    semWatch();
+    rankSoon();
+  }
+  function memDirty() {
+    if (!memOpen || !memDraft) return false;
+    const m = mem?.memories.find((x) => x.id === memOpen);
+    if (!m) return !!memDraft.text.trim();
+    return memDraft.text !== m.text || memDraft.why !== (m.why || "") || memDraft.tags !== (m.tags || []).join(", ") || memDraft.kind !== m.kind || memDraft.scope !== m.scope;
+  }
+  let memBusy = false;
+  async function memChange(path, body, done) {
+    if (memBusy) return false;
+    memBusy = true;
+    page.setAttribute("aria-busy", "true");
+    try {
+      const v = await api(path, body);
+      mem = v;
+      if (v.problem) status(v.problem, "err", 10000);
+      else if (done) status(done, "", 4000);
+      return true;
+    } catch (e) {
+      status(e.message, "err", 6000);
+      return false;
+    } finally {
+      memBusy = false;
+      page.removeAttribute("aria-busy");
+      render();
+    }
+  }
+  // a picker: the app's menu, never a <select>
+  function menuButton(text, cls, onclick) {
+    const b = el("button", "sess-pick lib-menu " + cls);
+    b.type = "button";
+    b.setAttribute("aria-haspopup", "menu");
+    b.append(el("span", "", text), svg(CHEV, 11, 1.6));
+    b.onclick = (e) => { e.stopPropagation(); onclick(e); };
+    return b;
+  }
+  const memTags = (s) => s.split(/[,，]/).map((x) => x.trim()).filter(Boolean);
+  function openMemory(m) {
+    memRemoving = null;
+    if (!m) { memOpen = "new"; memDraft = { text: "", why: "", tags: "", kind: "preference", scope: memScope || "global" }; return; }
+    memOpen = m.id;
+    memDraft = { text: m.text, why: m.why || "", tags: (m.tags || []).join(", "), kind: m.kind, scope: m.scope };
+  }
+  async function saveMemory() {
+    if (!memDraft || !memDraft.text.trim()) return;
+    const isNew = memOpen === "new";
+    const body = { text: memDraft.text.trim(), why: memDraft.why.trim(), tags: memTags(memDraft.tags), kind: memDraft.kind, scope: memDraft.scope };
+    if (!isNew) body.id = memOpen;
+    if (await memChange("memory", body, isNew ? t("Remembered") : t("Saved"))) { memOpen = null; memDraft = null; render(); }
+  }
+  // every scope a memory is kept in, and the places one can be put
+  function memScopes(withAgents) {
+    const out = ["global"];
+    for (const k of Object.keys(mem.projects || {})) out.push("project:" + k);
+    for (const m of mem.memories) if (!out.includes(m.scope) && (withAgents || !m.scope.startsWith("agent:"))) out.push(m.scope);
+    if (withAgents) for (const a of shownAgents()) if (!out.includes("agent:" + a.id.split("@")[0])) out.push("agent:" + a.id.split("@")[0]);
+    return out;
+  }
+  function renderMemory(body) {
+    body.append(intro(t("What your agents know about you and your projects, shared by all of them. They search it and save to it with Magpie Memory, and the agents switched on under Instructions read a summary of it.")));
+    if (!mem) {
+      loadMemory();
+      body.append(skeleton("memory").lastChild);
+      return;
+    }
+    const card = el("div", "list lib-list lib-memcard");
+    const row = el("div", "row lib-row lib-memdigest");
+    const who = el("div", "who");
+    who.append(el("div", "name", t("In the agents' instructions")));
+    who.append(el("div", "sub", mem.agents.length ? mem.agents.map(nameOf).join(", ") : t("No agent is switched on under Instructions")));
+    const sw = toggle(mem.digest, t("In the agents' instructions"), (on) => memChange("memory/digest", { on }, on ? t("The agents read the memories' summary") : t("The memories' summary is taken out of the agents' instructions")));
+    row.append(glyph(GLYPH.doc), who, sw);
+    card.append(row);
+    if (dist) card.append(distillRow(), dreamRow());
+    if (sem) card.append(semRow());
+    if (!lib.servers.some((s) => s.name === "magpie-memory")) {
+      const r = el("div", "row lib-row lib-memtools");
+      const w = el("div", "who");
+      w.append(el("div", "name", "Magpie Memory"), el("div", "sub", t("Add it for agents to search and save memories")));
+      r.append(glyph(GLYPH.search), w, button(t("Add"), "action", () => change("market/server", { id: "magpie-memory", values: {} }, t("{name} is in the library now", { name: "Magpie Memory" }))));
+      card.append(r);
+    }
+    body.append(card);
+
+    const all = mem.memories;
+    const count = (st) => all.filter((m) => st === "archived" ? m.status === "archived" || m.status === "superseded" : m.status === st).length;
+    const bar = el("div", "lib-membar");
+    const q = input(memQ, t("Search memories"));
+    q.type = "search";
+    q.className = "lib-memq";
+    q.dataset.lib = "memq";
+    q.oninput = () => { memQ = q.value; render(); rankSoon(); };
+    q.onkeydown = (e) => e.stopPropagation();
+    const sugg = count("candidate");
+    const st = segs([
+      ["active", t("In use") + (count("active") ? " · " + count("active") : "")],
+      ...(sugg || memStatus === "candidate" ? [["candidate", t("To review") + (sugg ? " · " + sugg : "")]] : []),
+      ["archived", t("Archived") + (count("archived") ? " · " + count("archived") : "")],
+    ], memStatus, (v) => { memStatus = v; memOpen = null; render(); rankSoon(); });
+    st.classList.add("lib-memstatus");
+    const sc = menuButton(memScope ? scopeName(memScope) : t("All"), "lib-memscope", () => openProtoMenu(sc, [{ v: "", name: t("Everywhere and every project"), literalName: true, note: "" }, ...memScopes(true).filter((s) => all.some((m) => m.scope === s)).map((s) => ({ v: s, name: scopeName(s), literalName: true, note: "" }))], memScope, (v) => { memScope = v; render(); }, "Where it applies"));
+    const words = memQ.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    // with search by meaning on, what it ranked comes first, best first,
+    // then what holds the words typed and it didn't rank
+    const ranked = memRank && memRank.q === memQ && memRank.status === memStatus ? memRank.ids : [];
+    const at = new Map(ranked.map((id, i) => [id, i]));
+    const shown = all.filter((m) => (memStatus === "archived" ? m.status === "archived" || m.status === "superseded" : m.status === memStatus)
+      && (!memScope || m.scope === memScope)
+      && (at.has(m.id) || words.every((w) => [m.text, m.why || "", ...(m.tags || []), kindName(m.kind), scopeName(m.scope)].join(" ").toLowerCase().includes(w))))
+      .sort((a, b) => (at.has(b.id) - at.has(a.id)) || (at.get(a.id) - at.get(b.id)) || (!!b.pinned - !!a.pinned) || (b.updated > a.updated ? 1 : b.updated < a.updated ? -1 : 0));
+    // what's picked is what's listed: a search, a filter or another
+    // status leaves the rest unpicked, and an empty list ends Select
+    memShown = shown;
+    for (const id of memPicked) if (!shown.some((m) => m.id === id)) memPicked.delete(id);
+    if (memAnchor && !memPicked.has(memAnchor) && !shown.some((m) => m.id === memAnchor)) memAnchor = null;
+    if (memPicking && !shown.length) endMemPick();
+    bar.append(q, sc, st, el("span", "grow"));
+    if (memPicking || shown.length > 1) bar.append(memPickButton());
+    bar.append(button("+ " + t("Add"), "action lib-memadd", () => { endMemPick(); openMemory(null); render(); }));
+    body.append(bar);
+
+    if (memStatus === "active" && !words.length && !memScope && !memPicking && (mem.suggestions || []).length) body.append(memSuggestions());
+    const list = el("div", "list lib-list lib-mems" + (memPicking ? " picking" : ""));
+    if (memOpen === "new") list.append(memDetail(null));
+    for (const m of shown) list.append(...memRow(m));
+    if (!shown.length && memOpen !== "new") {
+      list.append(el("div", "lib-none", words.length || memScope ? t("No memory matches.")
+        : memStatus === "candidate" ? t("Nothing to review.")
+        : memStatus === "archived" ? t("Nothing archived.")
+        : t("Nothing remembered yet. Tell an agent “remember that…”, or add one here.")));
+    }
+    body.append(list);
+    if (memPicking) body.append(memPickBar());
+  }
+
+  // what memory suggests (memory.Suggest): a memory learned in several
+  // projects to hold everywhere, a procedure searched for often to be a
+  // skill; each taken or turned down for good
+  function memSuggestions() {
+    const list = el("div", "list lib-list lib-memsugg");
+    for (const s of mem.suggestions) {
+      const r = el("div", "row lib-row");
+      r.dataset.sugg = s.key;
+      const w = el("div", "who");
+      w.append(el("div", "name", s.text));
+      const acts = el("div", "lib-acts");
+      if (s.to === "global") {
+        w.append(el("div", "sub", t("Learned in {projects}", { projects: s.projects.map((k) => mem.projects?.[k]?.name || k).join(", ") })));
+        acts.append(button(t("Use everywhere"), "action", () => memChange("memory/promote", { ids: s.ids }, t("It holds everywhere now"))));
+      } else {
+        w.append(el("div", "sub", t("Searched {n} times", { n: s.uses })));
+        acts.append(button(t("Make a skill"), "action", async () => { if (await memChange("memory/skill", { id: s.ids[0] }, t("It is a skill in the library now"))) load(true); }));
+      }
+      acts.append(button(t("Not now"), "action", () => memChange("memory/decline", { key: s.key })));
+      r.append(glyph(s.to === "global" ? GLYPH.web : GLYPH.skill), w, acts);
+      list.append(r);
+    }
+    return list;
+  }
+
+  // ---------- some memories, picked, acted on at once ----------
+
+  function endMemPick() {
+    memPicking = false;
+    memPicked.clear();
+    memAnchor = null;
+    memSure = false;
+  }
+  function memPickButton() {
+    const b = button(memPicking ? t("Done") : t("Select"), "action lib-select lib-memselect", () => {
+      const on = !memPicking;
+      endMemPick();
+      if (on) { memPicking = true; memOpen = null; memDraft = null; memRemoving = null; }
+      render();
+      if (on) requestAnimationFrame(() => page.querySelector(".lib-mems .lib-pickbox")?.focus({ preventScroll: true }));
+    });
+    b.dataset.alt = memPicking ? t("Select") : t("Done"); // as wide as the other, see library.css
+    b.title = memPicking ? t("Stop picking memories") : t("Pick some memories and act on them together");
+    return b;
+  }
+  // a click picks one or unpicks it; with Shift, every one from the last
+  // clicked to this one takes the last one's state
+  function memPick(id, range) {
+    const ids = memShown.map((m) => m.id);
+    const to = ids.indexOf(id), from = range && memAnchor ? ids.indexOf(memAnchor) : -1;
+    if (from >= 0 && to >= 0) {
+      const on = memPicked.has(memAnchor);
+      for (const x of ids.slice(Math.min(from, to), Math.max(from, to) + 1)) on ? memPicked.add(x) : memPicked.delete(x);
+    } else if (memPicked.has(id)) memPicked.delete(id);
+    else memPicked.add(id);
+    memAnchor = id;
+    memSync();
+  }
+  function memPickAll(on) {
+    for (const m of memShown) on ? memPicked.add(m.id) : memPicked.delete(m.id);
+    memSync();
+  }
+  // every box and the bar as the picks are now, without drawing the page
+  // again: the box with the focus keeps it
+  function memSync() {
+    memSure = false;
+    for (const row of page.querySelectorAll(".lib-mems .lib-mem")) {
+      const on = memPicked.has(row.dataset.id);
+      row.classList.toggle("picked", on);
+      const box = row.querySelector(".lib-pickbox");
+      if (box) box.checked = on;
+    }
+    page.querySelector(".lib-mempickbar")?.replaceWith(memPickBar());
+  }
+  // the keys a picked list answers to: ↑ ↓ move between the boxes (with
+  // Shift, picking as they go), ⌘A / Ctrl+A picks every one shown, Escape
+  // ends Select
+  function memPickKeys(e, id) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); endMemPick(); render(); page.querySelector(".lib-memselect")?.focus({ preventScroll: true }); return; }
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "a") { e.preventDefault(); e.stopPropagation(); memPickAll(memPicked.size !== memShown.length); return; }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    e.stopPropagation();
+    const boxes = [...page.querySelectorAll(".lib-mems .lib-pickbox")];
+    const i = boxes.findIndex((b) => b.closest(".lib-mem")?.dataset.id === id);
+    const next = boxes[i + (e.key === "ArrowDown" ? 1 : -1)];
+    if (!next) return;
+    next.focus({ preventScroll: true });
+    next.closest(".lib-mem")?.scrollIntoView({ block: "nearest" });
+    if (e.shiftKey) {
+      const nid = next.closest(".lib-mem").dataset.id;
+      if (!memAnchor) memAnchor = id;
+      memPick(nid, true);
+    }
+  }
+  function memPickBar() {
+    const bar = el("div", "row lib-row lib-pickbar lib-mempickbar");
+    const n = memShown.filter((m) => memPicked.has(m.id)).length;
+    const every = el("label", "lib-pickall");
+    const all = el("input", "lib-pickbox lib-mempickall");
+    all.type = "checkbox";
+    all.checked = n > 0 && n === memShown.length;
+    all.indeterminate = n > 0 && n < memShown.length;
+    all.onclick = (e) => { e.stopPropagation(); memPickAll(n !== memShown.length); };
+    all.onkeydown = (e) => { if (e.key === "Escape") memPickKeys(e, ""); };
+    every.append(all, el("span", "", t("All {n}", { n: memShown.length })));
+    bar.append(every, el("span", "lib-pickn" + (n ? "" : " none"), n ? t("{n} selected", { n }) : t("Shift-click picks a range")), el("span", "grow"));
+    if (n) {
+      const ids = memShown.filter((m) => memPicked.has(m.id)).map((m) => m.id);
+      const act = async (path, body, done) => {
+        const ok = await memChange(path, body, done);
+        if (ok) { memPicked.clear(); memAnchor = null; memSure = false; render(); }
+      };
+      // what the status shown moves them to: kept, archived or brought back
+      const to = memStatus === "candidate" ? ["active", t("Keep"), t("{n} kept", { n })]
+        : memStatus === "active" ? ["archived", t("Archive"), t("{n} archived", { n })]
+        : ["active", t("Restore"), t("{n} restored", { n })];
+      bar.append(button(to[1], "action lib-updall lib-memto", () => act("memory/status", { ids, status: to[0] }, to[2])));
+      // deleted on a second click, as one memory's Delete is
+      const del = button(memSure ? t("Delete {n} for good", { n }) : t("Delete"), (memSure ? "primary danger-fill" : "action danger") + " lib-updall lib-memdel", () => {
+        if (!memSure) {
+          memSure = true;
+          const b = memPickBar();
+          bar.replaceWith(b);
+          b.querySelector(".lib-memdel")?.focus({ preventScroll: true });
+          return;
+        }
+        act("memory/remove", { ids }, t("{n} deleted", { n }));
+      });
+      bar.append(del);
+      const c = button(t("Clear"), "lib-updall lib-pickclear", () => { memPicked.clear(); memAnchor = null; memSync(); });
+      c.title = t("Unpick them all");
+      bar.append(c);
+    }
+    bar.append(button(t("Done"), "action lib-updall lib-pickdone", () => { endMemPick(); render(); }));
+    bar.onkeydown = (e) => { if (e.key === "Escape") memPickKeys(e, ""); };
+    return bar;
+  }
+  // the model conversations are read and memory tidied with: the
+  // automatic one or one picked, shared by both rows
+  function memModelPick(d) {
+    const modelName = (id) => { const m = d.models.find((x) => x.id === id); return m ? (m.name || m.id) : id; };
+    const auto = d.auto ? t("Automatic") + " · " + modelName(d.auto) : t("Automatic");
+    const pick = menuButton(d.model ? modelName(d.model) : auto, "lib-distmodel", () => openProtoMenu(pick, [
+      { v: "", name: t("Automatic"), note: d.auto ? modelName(d.auto) : t("No models"), literalName: true },
+      ...d.models.map((m) => ({ v: m.id, name: m.name || m.id, note: m.providerName || "", literalName: true }))],
+    d.model || "", (v) => distChange("memory/distill", { on: d.on, model: v }), "Model", "", "left", false, d.models.length > 8 ? "Search models" : ""));
+    return pick;
+  }
+  // the reasoning level the model reads and tidies at, when its levels
+  // are known: Default sends none (RealZeroP27 on X)
+  function memEffortPick(d) {
+    if (!d.efforts?.length) return null;
+    const shown = d.effort ? d.effortNow || d.effort : "";
+    const b = menuButton(shown ? t(shown) : t("Default"), "lib-disteffort", () => openProtoMenu(b,
+      [{ v: "", name: "Default", note: "The model's own" }, ...d.efforts.map((l) => ({ v: l, name: l, note: "" }))],
+      shown, (v) => v !== (d.effort || "") && distChange("memory/distill", { on: d.on, model: d.model || "", effort: v }), "Thinking"));
+    b.prepend(effortIcon({ options: d.efforts.map((l) => ({ value: l })), value: shown }));
+    b.title = t("How hard this model thinks");
+    return b;
+  }
+  // how far back conversations are read: 7 days unless picked, All the
+  // latest 400 (memdistill.Listed); a longer range reads at once
+  const rangeName = (n) => n === -1 ? t("All") : n === 365 ? t("1 year") : t("{n} days", { n });
+  function memRangePick(d) {
+    const cur = d.days || 7;
+    const b = menuButton(rangeName(cur), "lib-distrange", () => openProtoMenu(b,
+      (d.ranges || [7, 30, 90, 365, -1]).map((n) => ({ v: String(n), name: rangeName(n), literalName: true, note: n === -1 ? "The latest 400 conversations" : "" })),
+      String(cur), (v) => +v !== cur && distChange("memory/distill", { on: d.on, model: d.model || "", days: +v }), "How far back it reads"));
+    b.title = t("How far back it reads");
+    return b;
+  }
+  // Conversations read into memory (internal/memdistill): what the
+  // agents' finished sessions say worth keeping waits under To review.
+  // Off until switched on; the model is the automatic one or one picked.
+  function distillRow() {
+    const d = dist;
+    const r = el("div", "row lib-row lib-memdistill");
+    const w = el("div", "who");
+    w.append(el("div", "name", t("Learn from conversations")));
+    let line = t("Reads each finished conversation for what to remember. You review each one before agents see it.");
+    let err = false;
+    // a run's progress, and what one left, so a long backlog is seen
+    // going and Read now reads the rest (RealZeroP27 on X)
+    const left = d.left ? " · " + t("{n} not read yet", { n: d.left }) : "";
+    if (d.on && d.running) line = d.of ? t("Reading conversations… {n} of {m}", { n: d.doing || 0, m: d.of }) : t("Reading conversations…");
+    else if (d.on && d.error) { line = t("Stopped {when}: {error}", { when: ago(d.last), error: d.error }) + left; err = true; }
+    else if (d.on && d.last) line = t("Read {when} · {k} new to review", { when: ago(d.last), k: d.added || 0 }) + left;
+    else if (d.on) line = t("Reads conversations quiet for 30 minutes, every hour");
+    w.append(el("div", "sub" + (err ? " err" : ""), line));
+    const acts = el("div", "lib-acts");
+    if (d.on) {
+      acts.append(memModelPick(d), ...[memEffortPick(d)].filter(Boolean), memRangePick(d));
+      if (!d.running) acts.append(button(t("Read now"), "action lib-distnow", () => distChange("memory/distill/run", {})));
+      else if (d.of > 1) acts.append(button(t("Stop"), "action lib-diststop", () => distChange("memory/distill/stop", {})));
+    }
+    acts.append(toggle(d.on, t("Learn from conversations"), (on) => distChange("memory/distill", { on, model: d.model || "" })));
+    r.append(glyph(GLYPH.search), w, acts);
+    return r;
+  }
+  // The nightly tidy (memdistill's Dream): memories that repeat are
+  // merged, ones out of date set aside, the last night's undone at once.
+  // The model is the one picked above; with reading off, it is picked here.
+  function dreamRow() {
+    const d = dist;
+    const r = el("div", "row lib-row lib-memdream");
+    const w = el("div", "who");
+    w.append(el("div", "name", t("Tidy up every night")));
+    const ch = d.changes || [];
+    const merged = ch.filter((c) => c.action === "merge").length, aside = ch.length - merged;
+    let line = t("Merges memories that repeat and sets aside ones out of date. What you wrote or pinned stays.");
+    let err = false;
+    if (d.dreaming) line = t("Tidying…");
+    else if (d.dreamError) { line = t("Couldn't tidy: {error}", { error: d.dreamError }); err = true; }
+    else if (d.dreamt && d.undone) line = t("Tidied {when} · undone", { when: ago(d.dreamt) });
+    else if (d.dreamt && ch.length) line = t("Tidied {when} · {m} merged, {a} set aside", { when: ago(d.dreamt), m: merged, a: aside });
+    else if (d.dreamt) line = t("Nothing to tidy {when}", { when: ago(d.dreamt) });
+    w.append(el("div", "sub" + (err ? " err" : ""), line));
+    const acts = el("div", "lib-acts");
+    if (ch.length && !d.undone && !d.dreaming) acts.append(button(t("Undo"), "action lib-dreamundo", () => distChange("memory/dream/undo", {}, true)));
+    if (d.dream && !d.on) acts.append(memModelPick(d), ...[memEffortPick(d)].filter(Boolean));
+    if (d.dream && !d.dreaming && !d.running) acts.append(button(t("Tidy now"), "action lib-dreamnow", () => distChange("memory/dream/run", {})));
+    acts.append(toggle(d.dream, t("Tidy up every night"), (on) => distChange("memory/dream", { on })));
+    r.append(glyph(GLYPH.backup), w, acts);
+    return r;
+  }
+  // Search by meaning (memembed): a small model on this computer reads
+  // each memory once, and the search finds what means the same in other
+  // words or another language. Switched off, the model is deleted.
+  function semRow() {
+    const s = sem;
+    const r = el("div", "row lib-row lib-memsem");
+    const w = el("div", "who");
+    w.append(el("div", "name", t("Search by meaning")));
+    let line = t("Finds memories that mean what you search for, in any language. Downloads a {size} model that runs on this computer.", { size: Math.round(s.size / 1e6) + " MB" });
+    let err = false;
+    if (s.on && s.downloading) line = t("Downloading the model · {p}%", { p: Math.floor(100 * s.done / (s.size || 1)) });
+    else if (s.on && s.error && !s.installed) { line = t("Couldn't download the model: {error}", { error: s.error }); err = true; }
+    else if (s.on && s.failed) { line = t("Couldn't read the memories: {error}", { error: s.failed }); err = true; }
+    else if (s.on && s.installed && s.read < s.of) line = t("Reading the memories · {n} of {m}", { n: s.read, m: s.of });
+    else if (s.on && s.installed) line = t("Finds memories that mean what you search for, in any language, on this computer.");
+    w.append(el("div", "sub" + (err ? " err" : ""), line));
+    const acts = el("div", "lib-acts");
+    if (s.on && s.error && !s.installed && !s.downloading) acts.append(button(t("Try again"), "action lib-semretry", () => semChange(true)));
+    acts.append(toggle(s.on, t("Search by meaning"), (on) => semChange(on)));
+    r.append(glyph(GLYPH.search), w, acts);
+    return r;
+  }
+  async function semChange(on) {
+    try {
+      sem = await api("memory/semantic", { on });
+    } catch (e) {
+      status(e.message, "err", 6000);
+    }
+    memRank = null;
+    render();
+    semWatch();
+    rankSoon();
+  }
+  // while the model downloads or the memories are read, the row is read
+  // again every 2s
+  function semWatch() {
+    clearTimeout(semPoll);
+    const s = sem;
+    if (!s?.on || !(s.downloading || s.reading || (s.installed && s.read < s.of && !s.failed))) return;
+    semPoll = setTimeout(async () => {
+      if (tab !== "memory") return;
+      const was = s.installed, before = JSON.stringify(sem);
+      try { sem = await api("memory/semantic"); } catch {}
+      if (JSON.stringify(sem) !== before) redrawRow(".lib-memsem", semRow);
+      semWatch();
+      if (!was && sem.installed) rankSoon();
+    }, 2000);
+  }
+  // the search, ranked by meaning a moment after the typing stops
+  function rankSoon() {
+    clearTimeout(rankT);
+    if (!sem?.on || !sem.installed || !memQ.trim()) { memRank = null; return; }
+    rankT = setTimeout(async () => {
+      const q = memQ, st = memStatus;
+      let r;
+      try { r = await api("memory/rank", { q, status: st }); } catch { return; }
+      if (q !== memQ || st !== memStatus || tab !== "memory") return;
+      memRank = r.ids ? { q, status: st, ids: r.ids } : null;
+      render();
+    }, 250);
+  }
+  async function distChange(path, body, reload) {
+    try {
+      dist = await api(path, body);
+      if (reload) mem = await api("memory");
+    } catch (e) {
+      status(e.message, "err", 6000);
+    }
+    render();
+    distWatch();
+  }
+  // while a run goes, the row is read again every 2s; when it ends the
+  // memories are too, for what it proposed
+  function distWatch() {
+    clearTimeout(distPoll);
+    if (!dist?.running && !dist?.dreaming) return;
+    distPoll = setTimeout(async () => {
+      if (tab !== "memory") return;
+      const before = JSON.stringify(dist), memWas = JSON.stringify(mem);
+      try {
+        dist = await api("memory/distill");
+        if (!dist.running && !dist.dreaming) mem = await api("memory");
+      } catch {}
+      if (JSON.stringify(mem) !== memWas) render();
+      else if (JSON.stringify(dist) !== before) { redrawRow(".lib-memdistill", distillRow); redrawRow(".lib-memdream", dreamRow); }
+      distWatch();
+    }, 2000);
+  }
+  // a poll's news drawn in its own row of the memory card, so the
+  // memories under it, and the one open to edit, stay as they are
+  function redrawRow(sel, make) {
+    const old = page.querySelector(".lib-memcard > " + sel);
+    if (old) old.replaceWith(make());
+    else render();
+  }
+  function memRow(m) {
+    const isOpen = !memPicking && memOpen === m.id;
+    const row = el("div", "row lib-row click lib-mem" + (isOpen ? " open" : ""));
+    row.dataset.id = m.id;
+    const who = el("div", "who");
+    who.append(el("div", "name", m.text));
+    const sub = [scopeName(m.scope), ...(m.tags || []).map((x) => "#" + x)];
+    const from = m.origin === "agent" || m.origin === "inferred" ? (m.sources || []).find((s) => s.agent)?.agent : "";
+    if (from) sub.push(t("from {agent}", { agent: nameOf(from) }));
+    who.append(el("div", "sub", sub.join(" · ")));
+    const tags = el("div", "lib-tags");
+    if (m.pinned) tags.append(tag(t("Pinned"), "", t("Given to the agents first")));
+    tags.append(tag(kindName(m.kind)));
+    const chev = el("span", "chev");
+    chev.append(svg(CHEV_R, 11, 1.7));
+    row.append(who, tags, chev);
+    if (memPicking) {
+      // a row with a box, which its click ticks rather than opening it
+      const box = el("input", "lib-pickbox");
+      box.type = "checkbox";
+      box.checked = memPicked.has(m.id);
+      box.setAttribute("aria-label", m.text);
+      box.onclick = (e) => { e.stopPropagation(); memPick(m.id, e.shiftKey); };
+      box.onkeydown = (e) => memPickKeys(e, m.id);
+      row.prepend(box);
+      row.classList.toggle("picked", box.checked);
+      // a Shift-click picks a range, not the text between
+      row.onmousedown = (e) => { if (e.shiftKey) e.preventDefault(); };
+      row.onclick = (e) => { memPick(m.id, e.shiftKey); box.focus({ preventScroll: true }); };
+      return [row];
+    }
+    row.onclick = () => { if (isOpen) { memOpen = null; memDraft = null; } else openMemory(m); render(); };
+    return isOpen ? [row, memDetail(m)] : [row];
+  }
+  function memDetail(m) {
+    const d = memDraft;
+    const det = el("div", "lib-detail lib-memdetail");
+    det.dataset.detail = "mem:" + (m ? m.id : "new");
+    const ta = el("textarea", "lib-text small");
+    ta.dataset.lib = "mem:" + (m ? m.id : "new");
+    ta.value = d.text;
+    ta.placeholder = t("What to remember, in a sentence — e.g. Use pnpm, never npm, in this repo");
+    ta.oninput = () => { d.text = ta.value; };
+    ta.onkeydown = (e) => { e.stopPropagation(); if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "Enter")) { e.preventDefault(); saveMemory(); } };
+    autosize(ta, 52);
+    // a new one's text takes the focus when it opens, not on every render
+    // after (the reader may be in its tags)
+    if (!m) queueMicrotask(() => { if (!det.classList.contains("kept")) ta.focus(); });
+    const pick = (label, value, opts, head, set) => {
+      const b = menuButton(label(value), "lib-mempick", () => openProtoMenu(b, opts.map((v) => ({ v, name: label(v), literalName: true, note: "" })), value, (v) => { set(v); render(); }, head));
+      return b;
+    };
+    const line = el("div", "lib-memline");
+    line.append(pick(kindName, d.kind, MEM_KINDS, "Kind", (v) => { d.kind = v; }), pick(scopeName, d.scope, memScopes(true), "Where it applies", (v) => { d.scope = v; }));
+    const tg = input(d.tags, t("Tags, separated by commas"));
+    tg.className = "lib-memtags grow";
+    tg.dataset.lib = "memtags:" + (m ? m.id : "new");
+    tg.oninput = () => { d.tags = tg.value; };
+    tg.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") saveMemory(); };
+    line.append(tg);
+    const why = input(d.why, t("Why (optional)"));
+    why.className = "lib-memwhy";
+    why.dataset.lib = "memwhy:" + (m ? m.id : "new");
+    why.oninput = () => { d.why = why.value; };
+    why.onkeydown = tg.onkeydown;
+    det.append(ta, line, why);
+    const acts = el("div", "lib-acts");
+    if (m) {
+      acts.append(button(m.pinned ? t("Unpin") : t("Pin"), "action", () => memChange("memory", { id: m.id, pinned: !m.pinned })));
+      if (m.status === "candidate") acts.append(button(t("Keep"), "action", () => memChange("memory", { id: m.id, status: "active" }, t("Kept"))));
+      else if (m.status === "active") acts.append(button(t("Archive"), "action", () => { memOpen = null; memChange("memory", { id: m.id, status: "archived" }, t("Archived")); }));
+      else acts.append(button(t("Restore"), "action", () => { memOpen = null; memChange("memory", { id: m.id, status: "active" }, t("Restored")); }));
+      const sure = memRemoving === m.id;
+      acts.append(button(sure ? t("Delete for good") : t("Delete"), sure ? "primary danger-fill" : "action danger", () => {
+        if (!sure) { memRemoving = m.id; render(); return; }
+        memRemoving = null; memOpen = null; memDraft = null;
+        memChange("memory/remove", { ids: [m.id] }, t("Deleted"));
+      }));
+    }
+    acts.append(el("span", "grow"), button(t("Cancel"), "", () => { memOpen = null; memDraft = null; memRemoving = null; render(); }), button(m ? t("Save") : t("Remember"), "primary", saveMemory));
+    det.append(acts);
+    det.onclick = (e) => e.stopPropagation();
+    return det;
+  }
 
   // ---------- RTK ----------
 
@@ -1123,6 +1890,363 @@ magpie.plugin("library", (ctx) => {
     rtkBusy.delete(a.id);
     render();
   }
+  // ---------- billion-context ----------
+
+  // billion-context (its CLI bili) folds an agent's older turns into
+  // summaries the model can open again, so a long session stays in the
+  // window. magpie runs bili's own installer for each agent switched on and
+  // its remover for one switched off, then puts back what the install
+  // changed in the agent's files (bili.go).
+  let bili = null;          // /api/library/bili
+  const biliBusy = new Set(); // agents being switched
+  let biliLoading = false, biliInstalling = false, biliInstallErr = "";
+  // billion-context.json's settings the tab changes, with magpie's models
+  // to pick the summary model from (/api/library/bili/settings)
+  let biliSet = null, biliSetBusy = false;
+  async function loadBili() {
+    if (biliLoading) return;
+    biliLoading = true;
+    try {
+      [bili, biliSet] = await Promise.all([api("library/bili"), api("library/bili/settings").catch(() => null)]);
+    } catch (e) {
+      status(e.message, "err");
+    }
+    biliLoading = false;
+    if (tab === "bili" && bili) render();
+  }
+  function renderBili(body) {
+    body.append(intro(t("billion-context folds an agent's older turns into summaries the model can open again, so a long session stays inside its window. Switch it on for an agent and magpie runs billion-context's own installer for it.")));
+    if (!bili) {
+      body.append(el("div", "row skeleton"));
+      loadBili();
+      return;
+    }
+    const card = el("div", "list lib-card lib-bili");
+    const ttl = el("div", "lib-cardhead");
+    ttl.append(glyph(GLYPH.fold), el("b", "", "billion-context"), el("span", "grow"));
+    card.append(ttl);
+    if (bili.path) {
+      ttl.append(el("span", "note mono", bili.version ? "v" + bili.version : tilde(bili.path)));
+      card.append(biliSaved(bili.saved));
+      card.append(el("p", "lib-rtk-gain", t("An agent switched on here can't also run billion-context-pi or opencode-acp.")));
+      if (bili.listErr) card.append(el("p", "lib-rtk-note lib-rtk-err", t("magpie couldn't read which agents have it: {why}", { why: bili.listErr })));
+    } else {
+      card.append(el("p", "lib-rtk-gain", biliInstalling
+        ? t("Installing billion-context… this can take a minute.")
+        : t("billion-context isn't installed. magpie can install it for you, or get it from its site.")));
+      if (bili.install) card.append(el("p", "lib-rtk-cmd", bili.install));
+      if (biliInstallErr && !biliInstalling) card.append(el("p", "lib-rtk-note lib-rtk-err lib-bili-install-err", t("The install failed: {why}", { why: biliInstallErr })));
+      const acts = el("div", "lib-acts");
+      if (bili.install) {
+        const ib = button(biliInstalling ? t("Installing…") : t("Install billion-context"), "action", installBili);
+        ib.disabled = biliInstalling;
+        acts.append(ib);
+      }
+      acts.append(button(t("Get billion-context"), bili.install ? "" : "action", () => browse(bili.url)), button(t("Check again"), "", () => { bili = null; render(); }));
+      card.append(acts);
+    }
+    body.append(card);
+    const rh = el("div", "row-head");
+    rh.append(el("span", "label", t("Agents")), el("span", "grow"), el("span", "note", t("restart an agent after switching it")));
+    body.append(rh);
+    const list = el("div", "list lib-list");
+    const rows = bili.agents.filter((a) => !isHidden(a));
+    for (const a of rows) {
+      const row = el("div", "row lib-row");
+      const who = el("div", "who");
+      who.append(el("div", "name", a.name));
+      row.append(icon(a.icon), who, el("span", "grow"));
+      // bili lists it as neither on nor off: partly there, broken
+      if (a.status) row.append(tag(t("Not whole"), "warn", t("bili plugin list says: {status}. Switch it off to take out what is there.", { status: a.status })));
+      const on = a.on || !!a.status;
+      const sw = toggle(on, t("{agent} folds its context with billion-context", { agent: a.name }), (v) => setBili(a, v));
+      if ((!bili.path) || biliBusy.has(a.id) || biliInstalling) sw.disabled = true;
+      row.append(sw);
+      list.append(row);
+    }
+    if (!rows.length) list.append(el("div", "lib-none", t("None of your agents can use billion-context with magpie: Pi, omp, OpenCode, Claude Code, Hermes, DeepSeek Harness or Zed.")));
+    body.append(list);
+    if (bili.path && biliSet?.path) biliSettings(body);
+  }
+  // billion-context.json's settings, as billion-context reads them: the
+  // ones changed often in front, its compression philosophy under
+  // Advanced. A change is written into the file (keeping what else it
+  // has) and the running billion-context reads it again (bili_config.go).
+  function biliSettings(body) {
+    const s = biliSet;
+    const rh = el("div", "row-head");
+    rh.append(el("span", "label", t("Settings")), el("span", "grow"), pathLink(s.path));
+    body.append(rh);
+    const list = el("div", "list lib-list lib-bili-set");
+    if (s.bad) {
+      list.append(el("div", "lib-none lib-rtk-err", t("billion-context.json can't be read, so magpie leaves it alone. Fix it or take it out to change these here.")));
+      body.append(list);
+      return;
+    }
+    const row = (name, ...end) => {
+      const r = el("div", "row lib-row");
+      const who = el("div", "who");
+      who.append(el("div", "name", name));
+      r.append(who, el("span", "grow"), ...end);
+      list.append(r);
+      return r;
+    };
+    const models = biliSet.models || [];
+    const target = s.targets[0] || "";
+    const ours = target.startsWith("magpie/") ? target.slice(7) : "";
+    const named = ours ? (models.find((m) => m.id === ours)?.name || ours) : target;
+    const pick = menuButton(named || t("Choose a model"), "lib-bili-model", () => openProtoMenu(pick, [
+      ...models.map((m) => ({ v: "m\n" + m.id, name: m.name || m.id, note: m.providerName || "", literalName: true })),
+      ...s.recipes.map((r) => ({ v: "r\n" + r, name: r, note: "billion-context.json", literalName: true }))],
+    ours ? "m\n" + ours : target ? "r\n" + target : "", (v) => {
+      const [k, id] = v.split("\n");
+      biliChange(k === "m" ? { model: id, summary: true } : { target: id, summary: true });
+    }, "Model", "", "left", false, models.length + s.recipes.length > 8 ? "Search models" : ""));
+    pick.disabled = biliSetBusy;
+    const sum = toggle(s.summary, t("Summarize with a fast model"), (v) => biliChange({ summary: v }));
+    sum.disabled = biliSetBusy || !target;
+    if (!target) sum.title = t("Choose a model first");
+    row(t("Summarize with a fast model"), pick, sum);
+    const nudge = toggle(s.nudge, t("Fold only when nudged"), (v) => biliChange({ nudge: v }));
+    nudge.disabled = biliSetBusy;
+    row(t("Fold only when nudged"), nudge);
+    const num = el("input", "lib-bili-growth");
+    num.type = "number";
+    num.min = "1000";
+    num.step = "1000";
+    num.inputMode = "numeric";
+    num.placeholder = "50000";
+    num.value = s.growth ? String(s.growth) : "";
+    num.disabled = biliSetBusy;
+    num.setAttribute("aria-label", t("Nudge every"));
+    const putGrowth = () => {
+      const v = num.value.trim() === "" ? 0 : Math.round(+num.value);
+      if (v !== (s.growth || 0)) biliChange({ growth: v });
+    };
+    num.onchange = putGrowth;
+    num.onkeydown = (e) => { if (e.key === "Enter") num.blur(); };
+    row(t("Nudge every"), num, el("span", "note", t("tokens")));
+    body.append(list);
+
+    const more = el("details", "lib-more lib-bili-more");
+    more.append(el("summary", "", t("Advanced")));
+    // compress.visibilityMarkers: the 📦/❌ lines after a fold, which
+    // some models imitate (@JamesYu32 on X)
+    const marks = el("div", "list lib-list lib-bili-marks");
+    const mk = toggle(s.markers !== false, t("Show compression markers"), (v) => biliChange({ markers: v }));
+    mk.disabled = biliSetBusy;
+    const mr = el("div", "row lib-row");
+    const mw = el("div", "who");
+    mw.append(el("div", "name", t("Show compression markers")));
+    mr.append(mw, el("span", "grow"), mk);
+    marks.append(mr);
+    more.append(marks);
+    const ph = el("div", "lib-bili-phil");
+    ph.append(el("div", "name", t("Compression philosophy")));
+    const ta = el("textarea", "lib-text small");
+    // what's typed outlives a redraw until it is saved
+    ta.value = biliPhil ?? (s.philosophy || "");
+    ta.oninput = () => { biliPhil = ta.value; };
+    ta.placeholder = t("billion-context's own");
+    ta.setAttribute("aria-label", t("Compression philosophy"));
+    ta.disabled = biliSetBusy;
+    ph.append(ta, el("p", "lib-rtk-note", t("Replaces billion-context's guidance on what a fold keeps. Setting it also tells billion-context you accept the risk of changing its prompts.")));
+    const acts = el("div", "lib-acts");
+    const save = button(t("Save"), "action", () => ta.value.trim() !== (s.philosophy || "") && biliChange({ philosophy: ta.value }));
+    save.disabled = biliSetBusy;
+    acts.append(save);
+    ph.append(acts);
+    more.append(ph);
+    // open as it was across redraws
+    more.open = biliMoreOpen;
+    more.ontoggle = () => { biliMoreOpen = more.open; };
+    body.append(more);
+    autosize(ta, 72);
+  }
+  let biliMoreOpen = false, biliPhil = null;
+  async function biliChange(c) {
+    biliSetBusy = true;
+    render();
+    try {
+      biliSet = await api("library/bili/settings", c);
+      if ("philosophy" in c) biliPhil = null;
+      status(biliSet.reloaded
+        ? t("Saved — the running billion-context uses it now")
+        : biliSet.running
+          ? t("Saved — billion-context didn't reload it; restart the agent to use it")
+          : t("Saved — billion-context uses it when it next starts"), "ok", 6000);
+    } catch (e) {
+      status(e.message, "err", 8000);
+    }
+    biliSetBusy = false;
+    render();
+  }
+  // What billion-context saved, in its own count: what its running proxy
+  // says at /__bili/overview (its dashboard's net savings), over every
+  // session on this computer; the last answer kept when none runs now
+  function biliSaved(s) {
+    if (!s) return el("p", "lib-rtk-gain lib-bili-saved", t("What billion-context saves shows here once it has run for an agent."));
+    const n = (v) => Number(v || 0).toLocaleString(intlLang());
+    const count = (v, one, many) => v === 1 ? t(one) : t(many, { n: n(v) });
+    const p = el("p", "lib-rtk-gain lib-bili-saved", s.hasFolds
+      ? t("{saved} tokens saved over {folds} in {sessions}", { saved: (s.net < 0 ? "-" : "") + tokens(Math.abs(s.net)), folds: count(s.folds, "1 fold", "{n} folds"), sessions: count(s.sessions, "1 session", "{n} sessions") })
+      : t("Nothing folded yet over {requests}: billion-context folds a session once it nears the model's window.", { requests: count(s.requests, "1 request", "{n} requests") }));
+    if (s.hasFolds) p.append(" ", el("span", "lib-rtk-scope", t("billion-context's own count, after the rebuilds a fold causes and the summaries' cost ({gross} before them): every session it ran on this computer, from any agent.", { gross: tokens(s.gross) })));
+    if (!s.live) {
+      const at = new Date(s.at);
+      p.append(" ", el("span", "lib-rtk-scope lib-bili-asof", t("As of {time}: billion-context isn't running now.", { time: isNaN(at) ? s.at : at.toLocaleString(intlLang(), { dateStyle: "medium", timeStyle: "short" }) })));
+    }
+    return p;
+  }
+  async function setBili(a, on) {
+    biliBusy.add(a.id);
+    render();
+    try {
+      bili = await api("library/bili", { agent: a.id, on });
+      const names = (bili.restart || [a.id]).map((id) => bili.agents.find((x) => x.id === id)?.name || id).join(", ");
+      status(on ? t("billion-context is on for {agent} — restart it to use it", { agent: names }) : t("billion-context is off for {agent} — restart it to see it", { agent: names }), "ok", 6000);
+    } catch (e) {
+      status(e.message, "err", 8000);
+    }
+    biliBusy.delete(a.id);
+    render();
+  }
+  async function installBili() {
+    biliInstalling = true;
+    biliInstallErr = "";
+    render();
+    try {
+      bili = await api("library/bili/install", {});
+      status(t("billion-context is installed — switch it on for your agents below"), "ok", 6000);
+    } catch (e) {
+      biliInstallErr = e.message;
+      status(e.message, "err", 10000);
+    }
+    biliInstalling = false;
+    render();
+  }
+
+  // ---------- Pi extensions ----------
+
+  // Each Pi here (this computer's, and each WSL distro's) with the
+  // extensions and packages it loads (piext.go). One is switched off or on
+  // in its settings.json the way `pi config` does it, and copied to
+  // another Pi: a package as its entry in that Pi's settings.json, which
+  // Pi installs itself when it starts; an extension as its file or folder.
+  // leokon3 on Discord: moving an extension from the WSL Pi to Windows'.
+  const hasPi = () => !!lib && !gatewayPage() && lib.agents.some((a) => a.id.split("@")[0] === "pi" && !a.gone && !a.unseen && !isHidden(a));
+  let piView = null;       // /api/library/pi
+  const piBusy = new Set(); // "<pi> <ext or package>" being switched or copied
+  let piLoading = false;
+  async function loadPi() {
+    if (piLoading) return;
+    piLoading = true;
+    try {
+      piView = await api("library/pi");
+    } catch (e) {
+      status(e.message, "err");
+    }
+    piLoading = false;
+    if (tab === "pi" && piView) render();
+  }
+  function renderPi(body) {
+    body.append(intro(t("The extensions and packages each Pi loads. Switch one off, or copy it to another Pi: a package is added to that Pi's settings, and Pi installs it when it next starts.")));
+    if (!piView) {
+      body.append(el("div", "row skeleton"));
+      loadPi();
+      return;
+    }
+    const pis = (piView.pis || []).filter((p) => !isHidden({ id: p.id }));
+    const live = pis.filter((p) => !p.asleep && !p.err);
+    for (const p of pis) {
+      const rh = el("div", "row-head lib-pi-head");
+      rh.dataset.pi = p.id;
+      rh.append(el("span", "label", p.name), el("span", "grow"));
+      if (p.dir && !p.asleep) rh.append(pathLink(p.dir));
+      body.append(rh);
+      const list = el("div", "list lib-list lib-pi");
+      list.dataset.pi = p.id;
+      const others = live.filter((x) => x.id !== p.id);
+      if (p.asleep) {
+        list.append(el("div", "lib-none", t("WSL {distro} isn't running: magpie doesn't start it to read or change {agent}. Start the distro, then Check again.", { distro: p.wsl, agent: p.name })));
+      } else if (p.err) {
+        list.append(el("div", "lib-none lib-pi-err", t("magpie couldn't read {file}, so it lists nothing and changes nothing there: {why}", { file: "settings.json", why: p.err })));
+      } else {
+        for (const x of p.extensions || []) list.append(piRow(p, others, { ext: x.id }, x.name, tilde(x.path), x.on, null));
+        for (const k of p.packages || []) {
+          const tags = [tag(k.kind)];
+          if (!k.installed) tags.push(tag(t("Not installed"), "", t("Pi installs it when it next starts")));
+          else if (k.version) tags.push(tag("v" + k.version));
+          list.append(piRow(p, others, { pkg: k.source }, k.name, k.source, k.on, tags, k.filtered, () => confirmRemovePi(p, k)));
+        }
+        if (!(p.extensions || []).length && !(p.packages || []).length) list.append(el("div", "lib-none", t("No extensions or packages yet.")));
+      }
+      body.append(list);
+    }
+    if (live.length) body.append(discover("pi"));
+  }
+  function piRow(p, others, what, name, sub, on, tags, filtered, remove) {
+    const key = p.id + " " + (what.ext || what.pkg);
+    const row = el("div", "row lib-row lib-pi-row");
+    row.dataset.id = what.ext || what.pkg;
+    const who = el("div", "who");
+    const n = el("div", "name mono", name);
+    for (const g of tags || []) n.append(g);
+    who.append(n, el("div", "sub mono", sub));
+    row.append(who);
+    if (others.length) {
+      const b = button(t("Copy to…"), "lib-pi-copy", () => {
+        openProtoMenu(b, others.map((x) => ({ v: x.id, name: x.name, literalName: true, note: "" })), "", (to) => copyPi(p, others.find((x) => x.id === to), what, name), "Copy to another Pi", "", "right");
+      });
+      b.disabled = piBusy.has(key);
+      row.append(b);
+    }
+    const sw = toggle(on, t("{agent} loads {name}", { agent: p.name, name }), (v) => setPi(p, what, name, v));
+    if (filtered) sw.title = t("This entry loads only some of the package; change it with pi config");
+    sw.disabled = !!filtered || piBusy.has(key);
+    row.append(sw);
+    if (remove) {
+      const rm = button("", "lib-icon danger lib-rm lib-pi-rm", remove);
+      rm.append(svg(GLYPH.trash, 13, 1.4));
+      rm.title = t("Remove");
+      rm.disabled = piBusy.has(key);
+      row.append(rm);
+    }
+    return row;
+  }
+  async function setPi(p, what, name, on) {
+    const key = p.id + " " + (what.ext || what.pkg);
+    piBusy.add(key);
+    render();
+    try {
+      piView = await api("library/pi", { pi: p.id, ...what, on });
+      status(on ? t("{name} is on for {agent}: Pi loads it when it next starts, or at /reload", { name, agent: p.name }) : t("{name} is off for {agent}: Pi drops it when it next starts, or at /reload", { name, agent: p.name }), "ok", 6000);
+    } catch (e) {
+      status(e.message, "err", 8000);
+    }
+    piBusy.delete(key);
+    render();
+  }
+  async function copyPi(p, to, what, name) {
+    if (!to) return;
+    const key = p.id + " " + (what.ext || what.pkg);
+    piBusy.add(key);
+    render();
+    try {
+      const v = await api("library/pi/copy", { from: p.id, to: to.id, ...what });
+      piView = v;
+      status(what.pkg
+        ? t("{name} is in {agent}'s packages now: Pi installs it when it next starts", { name, agent: to.name })
+        : v.install
+          ? t("{name} is copied to {agent}. It needs its packages: run npm install in {dir} there", { name, agent: to.name, dir: v.install })
+          : t("{name} is copied to {agent}: Pi loads it when it next starts, or at /reload", { name, agent: to.name }), "ok", v.install ? 12000 : 6000);
+    } catch (e) {
+      status(e.message, "err", 8000);
+    }
+    piBusy.delete(key);
+    render();
+  }
+
   // what rtk saved day by day (week by week past 92 days), over the last
   // 30 or 90 days or since it first ran: each bar the commands' whole
   // output, the part RTK kept from the model on top of what still went
@@ -1158,7 +2282,11 @@ magpie.plugin("library", (ctx) => {
       try { localStorage.setItem("magpie.rtkRange", String(r)); } catch {}
       chart.replaceWith(rtkChart(days));
     });
-    head.append(el("span", "label", t(step === 7 ? "Saved by week" : "Saved by day")), seg, el("span", "grow"), el("span", "peak", tokens(peak)));
+    // the bars' scale, the busiest day (week) in the range, said as that:
+    // a bare number there read as RTK's total, one that stopped growing
+    // once no day passed the old busiest (jasonchia58 on X); the Usage page's is #6517
+    head.append(el("span", "label", t(step === 7 ? "Saved by week" : "Saved by day")), seg, el("span", "grow"));
+    if (sum.input) head.append(el("span", "peak", t(step === 7 ? "peak week {n}" : "peak day {n}", { n: tokens(peak) })));
     const bars = el("div", "bars"), labels = el("div", "labels");
     const k = buckets.length;
     const every = k <= 8 ? 1 : k <= 31 ? Math.ceil(k / 6) : Math.ceil(k / 5);
@@ -1332,8 +2460,11 @@ magpie.plugin("library", (ctx) => {
     for (const [id, v] of Object.entries(texts)) if (setOf(id) && v !== setOf(id).text) out[id] = v;
     return out;
   }
+  function unsavedProjects() {
+    return Object.entries(projTexts).filter(([dir, v]) => { const p = lib.projects.find((x) => x.dir === dir); return p && v !== (p.instr || ""); });
+  }
   function dirty() {
-    if (Object.keys(unsavedTexts()).length) return true;
+    if (Object.keys(unsavedTexts()).length || unsavedProjects().length) return true;
     return Object.entries(extras).some(([id, v]) => v !== (lib.instructions.agents.find((a) => a.agent === id)?.extra || ""));
   }
 
@@ -1344,17 +2475,33 @@ magpie.plugin("library", (ctx) => {
     const ex = {};
     for (const [id, v] of Object.entries(extras)) if (v !== (lib.instructions.agents.find((a) => a.agent === id)?.extra || "")) ex[id] = v;
     if (Object.keys(ex).length) c.extra = ex;
-    if (!Object.keys(c).length) return;
-    if (await change("instructions/save", c)) {
+    const projs = unsavedProjects();
+    if (!Object.keys(c).length && !projs.length) return;
+    if (Object.keys(c).length && await change("instructions/save", c)) {
       for (const k of Object.keys(texts)) delete texts[k];
       for (const k of Object.keys(extras)) delete extras[k];
       render();
     }
+    // a project's own: its first text goes to the agents the shared
+    // instructions are on for, as a project's first skill does
+    for (const [dir, v] of projs) {
+      const p = lib.projects.find((x) => x.dir === dir);
+      if (!p) continue;
+      const body = { dir, instr: v };
+      let agents = p.instrAgents || [];
+      if (!agents.length && v.trim()) agents = body.agents = projectInstrDefaults();
+      const done = !v.trim() ? t("{name}'s instructions are taken out of its files", { name: p.name })
+        : agents.length ? t("{name}'s instructions are in its files for {agents}", { name: p.name, agents: agents.map(nameOf).join(", ") })
+        : t("{name}'s instructions are saved — pick the agents that read them", { name: p.name });
+      if (await change("projects/instructions", body, done)) { delete projTexts[dir]; render(); }
+    }
   }
   async function discard(force = false) {
     if (force !== true && dirty() && !(await confirmDiscard())) return;
+    if (force === true) { memOpen = null; memDraft = null; }
     for (const k of Object.keys(texts)) delete texts[k];
     for (const k of Object.keys(extras)) delete extras[k];
+    for (const k of Object.keys(projTexts)) delete projTexts[k];
     render();
   }
 
@@ -1399,6 +2546,9 @@ magpie.plugin("library", (ctx) => {
     const skip = shownAgents().filter((a) => !a.instructions && !a.asleep);
     if (skip.length) body.append(el("p", "lib-aside", t(skip.length > 1 ? "{agents} keep no user-wide instructions file." : "{agents} keeps no user-wide instructions file.", { agents: skip.map((a) => a.name).join(", ") })));
     body.append(...asleepAsides(rows.filter((a) => a.asleep)));
+    // a project's own, so the shared ones keep what holds everywhere
+    // (VictorHong1022 on X), as a project has skills of its own
+    if (!agentless()) renderProjects(body, "instructions");
     body.append(bar);
   }
 
@@ -1433,6 +2583,7 @@ magpie.plugin("library", (ctx) => {
     if (!isOpen) return [row];
 
     const det = el("div", "lib-detail");
+    det.dataset.detail = "set:" + x.id;
     const nm = input(setName(x), t("Name"));
     nm.dataset.lib = "setname:" + x.id;
     nm.className = "lib-setname";
@@ -1572,6 +2723,7 @@ magpie.plugin("library", (ctx) => {
     if (!isOpen) return [row];
 
     const det = el("div", "lib-detail");
+    det.dataset.detail = "agent:" + a.agent;
     if (a.override) {
       const w = el("div", "lib-warn");
       w.append(el("span", "", t("{agent} reads {file} instead of this file while it has anything in it.", { agent: a.name, file: tilde(a.override) }) + " "), pathLink(a.override));
@@ -1652,6 +2804,8 @@ magpie.plugin("library", (ctx) => {
   const remote = (s) => s.transport === "http" || s.transport === "sse";
   const reaches = (s) => (a) => !a || (!(remote(s) && a.noRemote) && !(s.transport === "sse" && a.noSSE) && !(envRefs(s) && a.noEnvRefs));
 
+  let serversOffFolded = true; // the servers turned off, folded below the ones on
+  try { serversOffFolded = localStorage.getItem("magpie.offServersOpen") !== "1"; } catch {}
   function renderServers(body) {
     body.append(intro(agentless()
       ? t("Add the servers other apps should reach, and turn on the MCP router: they connect at its address, from another computer with a gateway key.")
@@ -1666,8 +2820,41 @@ magpie.plugin("library", (ctx) => {
       if (agentless()) body.append(...hubPart());
     } else {
       const list = el("div", "list lib-list");
+      // turned off, they fold away below the ones on, as Providers' do
+      // (hzlxb on X), folded at first and remembered; while picking, the
+      // fold stays open, for every server picked to be in sight
+      const offList = el("div", "list lib-list lib-offlist");
+      offList.id = "lib-offServers";
+      const offHead = el("div", "row-head off-head lib-offhead");
+      const fold = el("button", "fold");
+      fold.type = "button";
+      fold.setAttribute("aria-controls", offList.id);
+      const offCount = el("span", "note");
+      fold.append(svg(CHEV_R, 11, 1.6), el("span", "label", t("Servers turned off")), offCount);
+      offHead.append(fold);
+      const syncFold = () => {
+        const offs = offList.childElementCount, open = !!picking || !serversOffFolded;
+        offHead.hidden = !offs;
+        list.hidden = offs > 0 && !list.childElementCount;
+        offList.hidden = !offs || !open;
+        offCount.textContent = offs || "";
+        fold.disabled = !!picking;
+        fold.setAttribute("aria-expanded", String(open));
+        fold.title = t(open ? "Fold the servers turned off away" : "Show the servers turned off");
+      };
+      fold.onclick = (e) => {
+        e.stopPropagation();
+        serversOffFolded = !serversOffFolded;
+        try { localStorage.setItem("magpie.offServersOpen", serversOffFolded ? "0" : "1"); } catch {}
+        syncFold();
+      };
       // in the order the reader picked (#481), A→Z till then
-      const fill = () => list.replaceChildren(...[...lib.servers].sort(byName(sortOf("libServers"))).map((s) => serverRow(s, all)));
+      const fill = () => {
+        const sorted = [...lib.servers].sort(byName(sortOf("libServers")));
+        list.replaceChildren(...sorted.filter((s) => !s.hidden).map((s) => serverRow(s, all)));
+        offList.replaceChildren(...sorted.filter((s) => s.hidden).map((s) => serverRow(s, all)));
+        syncFold();
+      };
       // one heading over the list, with what the skills' has (#1027): the
       // order, Select, every server on or off for every agent shown, one
       // agent's (#475, or out of a hidden one) and every server out
@@ -1687,7 +2874,7 @@ magpie.plugin("library", (ctx) => {
         body.append(rh);
       }
       fill();
-      body.append(list);
+      body.append(list, offHead, offList);
       if (picking) body.append(pickBar(all));
       const after = el("div", "after-list");
       after.append(button(t("＋ Add server"), "", () => editServer(null)));
@@ -1702,7 +2889,8 @@ magpie.plugin("library", (ctx) => {
       // and again once it changed after that: a sign-in since isn't left
       // beside "needs sign-in" (新v学员 on Discord)
       // With no agent, the router is what starts them, so on it checks them too
-      const unchecked = lib.servers.filter((s) => (inUse(s) || (agentless() && lib.mcpHub && inHub(s)) || health.has(s.name)) && health.get(s.name)?.key !== healthKey(s));
+      // One turned off is started for nobody, and checked only on a click.
+      const unchecked = lib.servers.filter((s) => (!s.hidden && (inUse(s) || (agentless() && lib.mcpHub && inHub(s))) || health.has(s.name)) && health.get(s.name)?.key !== healthKey(s));
       queueMicrotask(() => checkHealth(unchecked));
     }
     // an agent's own servers (Codex's node_repl, added each time it starts)
@@ -1781,6 +2969,15 @@ magpie.plugin("library", (ctx) => {
         p.dataset.why = k;
         out.push(p);
       }
+    }
+    // skills in an agent's own folder that the library doesn't have are not
+    // listed, so each stays in its prompt
+    const mine = skillAgents().filter((a) => !a.gone && (a.skillRouter === "on" || a.skillRouter === "none")
+      && lib.foundSkills.some((f) => !f.manual && f.agents.includes(a.id))).map((a) => a.name).join(", ");
+    if (mine) {
+      const p = el("p", "lib-aside lib-hub-why", t("{agents} has skills of its own that aren't in the library, so the router doesn't list them: bring them in below.", { agents: mine }));
+      p.dataset.why = "found";
+      out.push(p);
     }
     return out;
   }
@@ -2133,7 +3330,8 @@ magpie.plugin("library", (ctx) => {
   }
 
   function serverRow(s, all) {
-    const row = el("div", "row lib-row click lib-server");
+    const row = el("div", "row lib-row click lib-server" + (s.hidden ? " off" : ""));
+    row.dataset.server = s.name;
     const who = el("div", "who");
     const nm = el("div", "name mono", s.name);
     if (s.signIn?.dead) nm.append(tag(t("Sign-in ran out"), "warn", t("Open it to sign in again")));
@@ -2152,13 +3350,26 @@ magpie.plugin("library", (ctx) => {
     who.append(noteSub(s.note, sub, serverLine(s)), toolsEl(s.name));
     row.append(mark(s.icon, s.transport === "stdio" ? GLYPH.cmd : GLYPH.web), who, ...removeAct(() => confirmRemoveServer(s)),
       // no agent to give it to: other apps reach it through the router
-      ...(agentless() ? [] : [agentChips(withGone(all, s.agents), s.agents, chipsChange("servers/agents", s.name, "servers", (x) => serverRow(x, all)), { problems: s.problems, blocked: sseBlocked(s), all: true })]));
+      ...(agentless() ? [] : [agentChips(withGone(all, s.agents), s.agents, chipsChange("servers/agents", s.name, "servers", (x) => serverRow(x, all)), { problems: s.problems, blocked: sseBlocked(s), all: true })]),
+      ...serverSwitch(s));
     if (picking) return pickRow(row, s.name);
     // a line of its own under the row, not in the name's column (tao0194)
     if (s.name === "magpie-browser" && !s.agents?.length) row.append(browserAsk(row));
     row.onclick = () => editServer(s);
     row.title = t("Edit {name}", { name: s.name });
     return row;
+  }
+
+  // A server off for everyone, or on again as it was (swang20201 on X:
+  // an installed server could only be removed). Off, no agent, project or
+  // app at the router's address has it, and it keeps its settings, env
+  // and sign-in; on, the agents it had get it back. While picking, the
+  // bar is the one acting, as with Remove.
+  function serverSwitch(s) {
+    if (picking) return [];
+    const on = !s.hidden;
+    return [toggle(on, t("Turn {name} on or off", { name: s.name }), (v) => change("servers/on", { name: s.name, on: v },
+      v ? t("{name} is on again", { name: s.name }) : t("{name} is off; its settings are kept", { name: s.name })))];
   }
 
   // Magpie Browser connected and given to no agent: it is added opt-in, so
@@ -2244,6 +3455,12 @@ magpie.plugin("library", (ctx) => {
       projects && t("It is taken out of the {n} projects magpie placed it in too.", { n: projects }),
       s.signIn?.signedIn && t("magpie's sign-in to it is forgotten too."),
       t("Servers your agents have that aren't in the library stay as they are."),
+    ]);
+  }
+  function confirmRemoveEnv(v) {
+    confirmRemoveOne("env", v.name, t("Remove the variable {name}?", { name: v.name }), [
+      takenFromOne(v),
+      t("Variables your agents have that aren't in the library stay as they are, and so does one you changed in an agent's file."),
     ]);
   }
   function confirmRemoveHook(h) {
@@ -2442,6 +3659,9 @@ magpie.plugin("library", (ctx) => {
     }
     switch (h.why) {
       case "home": return [t("won't start in home"), more(t("It exits when started in your home folder, where magpie runs it for the agents given it, and works in a project folder. Turn off Through the MCP router in its editor, so each agent starts it in its own project"))];
+      // Chrome DevTools' or Playwright's server in magpie's container: its
+      // tools are listed, and each fails for want of a Chrome
+      case "nobrowser": return [t("no Chrome here"), t("It lists its {n} tools, but they drive a Chrome it starts itself, and there is none where magpie runs. Magpie Browser, in the Library, uses your own Chrome instead; or start it with {opt} at a Chrome it can reach", { n: h.tools, opt: h.detail })];
       case "notfound": return [t("can't start: {cmd} not found", { cmd: h.detail }), t("Can't start it: there is no {cmd} on the PATH magpie has", { cmd: h.detail })];
       case "start": return [t("can't start"), more(t("Can't start it"))];
       case "exited": return [h.code ? t("exited ({code})", { code: h.code }) : t("exited"), more(h.code ? t("It exited with code {code} before listing its tools", { code: h.code }) : t("It exited before listing its tools"))];
@@ -2550,10 +3770,10 @@ magpie.plugin("library", (ctx) => {
     try {
       const st = await api("library/mcp-signin", { name });
       if (mcpSigning?.name !== name || mcpSigning.id) return; // canceled
-      if (web && st.url) api("open", { url: st.url }).catch(() => {});
+      if (web && st.url && !st.linkOnly) api("open", { url: st.url }).catch(() => {});
       mcpSigning = { ...st, name };
       signMoved(name);
-      if (st.openError) editServer(s);
+      if (st.openError || st.linkOnly) editServer(s);
       followSignIn(st.id, name);
     } catch (e) {
       if (mcpSigning?.name !== name) return;
@@ -2601,28 +3821,49 @@ magpie.plugin("library", (ctx) => {
             draw();
             signMoved(name);
           }));
+      } else if (cur.accounts?.length > 1) {
+        // several sign-ins: the one in use is what every agent is given
+        box.append(acctList(cur.accounts.map((a) => ({ id: a.id, name: a.label || t("Account {n}", { n: cur.accounts.indexOf(a) + 1 }), on: a.active, bad: a.dead })), "signin", name, draw));
+        line.append(addSign(), el("span", "grow"), button(t("Sign out"), "", signOut));
       } else if (cur.signedIn && !cur.dead) {
-        line.append(tag(t("Signed in"), "lib-signed"), el("span", "note", t("The agents given it use magpie's sign-in")), el("span", "grow"), button(t("Sign out"), "", signOut));
+        line.append(tag(t("Signed in"), "lib-signed"), el("span", "note", t("The agents given it use magpie's sign-in")), el("span", "grow"), name ? addSign() : "", button(t("Sign out"), "", signOut));
       } else {
         if (cur.dead) line.append(tag(t("Sign-in ran out"), "warn"));
-        line.append(button(ready?.saves?.() ? t("Save and sign in") : cur.dead ? t("Sign in again") : t("Sign in"), "action", start));
+        line.append(button(ready?.saves?.() ? t("Save and sign in") : cur.dead ? t("Sign in again") : t("Sign in"), "action", () => start()));
       }
       box.append(line);
       // the browser didn't start (#2043): the page to open by hand, rather
-      // than waiting on one that never opened until the sign-in times out
-      if (sg?.state === "waiting" && sg.openError && sg.url) {
-        box.append(el("div", "lib-signin-err", t("magpie couldn't open your browser: {error}. Open the sign-in link below in a browser yourself.", { error: sg.openError })));
+      // than waiting on one that never opened until the sign-in times out;
+      // or the user keeps sign-in pages to a browser of their own
+      // (settings.SignInLinkOnly): the link to copy there, or open here
+      if (sg?.state === "waiting" && (sg.openError || sg.linkOnly) && sg.url) {
+        box.append(sg.linkOnly
+          ? el("div", "note", t("magpie didn't open the sign-in page, as set in Settings. Copy the link below into the browser you sign in with."))
+          : el("div", "lib-signin-err", t("magpie couldn't open your browser: {error}. Open the sign-in link below in a browser yourself.", { error: sg.openError })));
         const link = el("div", "lib-signin-link");
         const u = el("code", "", sg.url);
         u.title = sg.url;
         const cp = copyBtn(sg.url, t("Sign-in link"));
         cp.title = t("Copy link");
         link.append(u, cp);
+        if (sg.linkOnly) link.append(button(t("Open in browser"), "", () => browse(sg.url)));
         box.append(link);
       }
       if (sg?.state === "failed") box.append(el("div", "lib-signin-err", sg.error));
     };
-    async function start() {
+    // another sign-in to the server, called what the reader types
+    let adding = false;
+    function addSign() {
+      if (!adding) return button(t("＋ Add account"), "lib-addacct", () => { adding = true; draw(); box.querySelector(".lib-acct-new input")?.focus(); });
+      const f = el("span", "lib-acct-new");
+      const i = field2("", t("Name"), () => {});
+      i.maxLength = 60;
+      const go = () => { adding = false; start(i.value.trim()); };
+      i.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); e.stopPropagation(); go(); } });
+      f.append(i, button(t("Sign in"), "action", go), button(t("Cancel"), "", () => { adding = false; draw(); }));
+      return f;
+    }
+    async function start(label) {
       const was = name;
       mcpSigning = { name, state: "starting" };
       draw();
@@ -2634,8 +3875,8 @@ magpie.plugin("library", (ctx) => {
           name = saved;
           mcpSigning = { name, state: "starting" };
         }
-        const st = await api("library/mcp-signin", { name });
-        if (web && st.url) api("open", { url: st.url }).catch(() => {});
+        const st = await api("library/mcp-signin", typeof label === "string" ? { name, add: true, label } : { name });
+        if (web && st.url && !st.linkOnly) api("open", { url: st.url }).catch(() => {});
         mcpSigning = { ...st, name };
         draw();
         followSignIn(st.id, name);
@@ -2657,6 +3898,76 @@ magpie.plugin("library", (ctx) => {
     }
     box.redraw = draw;
     signDraw = { box, draw };
+    draw();
+    return box;
+  }
+
+  // the accounts of a server, one in use (Elorynth on X): a click on a row
+  // puts it in use, in place; every agent given the server follows. kind is
+  // "signin" for magpie's OAuth sign-ins, "header" for sets of headers
+  function acctList(rows, kind, name, redraw) {
+    const list = el("div", "lib-accts");
+    list.setAttribute("role", "radiogroup");
+    const call = async (op, id) => {
+      try {
+        take(await api("library/mcp-account", { name, kind, op, id }));
+        render();
+        redraw();
+      } catch (e) { status(e.message, "err", 6000); }
+    };
+    for (const r of rows) {
+      const row = el("div", "lib-acct" + (r.on ? " on" : ""));
+      const pick = el("button", "lib-acct-pick");
+      pick.setAttribute("role", "radio");
+      pick.setAttribute("aria-checked", r.on ? "true" : "false");
+      pick.append(el("span", "lib-acct-dot"), el("span", "lib-acct-name", r.name));
+      if (r.bad) pick.append(tag(t("Sign-in ran out"), "warn"));
+      pick.onclick = (e) => { e.stopPropagation(); if (!r.on) call("use", r.id); };
+      row.append(pick);
+      if (r.id !== "") {
+        const x = button("", "lib-x", () => call("remove", r.id));
+        x.append(svg("M4.5 4.5l7 7M11.5 4.5l-7 7", 11, 1.6));
+        x.title = t("Remove");
+        row.append(x);
+      }
+      list.append(row);
+    }
+    return list;
+  }
+  // Authorization headers a server can be asked with, besides its own
+  function headerAccounts(name) {
+    const box = el("div", "lib-hdr-accts");
+    let adding = false;
+    const draw = () => {
+      box.replaceChildren();
+      const s = lib.servers.find((x) => x.name === name);
+      if (!s) return;
+      const l = s.accounts || [];
+      if (l.length) {
+        box.append(acctList([{ id: "", name: t("Default"), on: !s.account }, ...l.map((a) => ({ id: a.id, name: a.name, on: a.id === s.account }))], "header", name, draw));
+      }
+      if (!adding) {
+        box.append(button(t("＋ Add account"), "lib-addacct", () => { adding = true; draw(); box.querySelector(".lib-acct-form input")?.focus(); }));
+        return;
+      }
+      const form = el("div", "lib-acct-form");
+      let label = "", headers = { Authorization: "" };
+      const add = async () => {
+        try {
+          take(await api("library/mcp-account", { name, kind: "header", op: "add", label, headers }));
+          adding = false;
+          render();
+          draw();
+        } catch (e) { status(e.message, "err", 6000); }
+      };
+      const n = field2("", t("Name"), (v) => { label = v; });
+      n.maxLength = 60;
+      form.append(n, pairs(headers, "Authorization", "Bearer …", (v) => { headers = v; }),
+        el("div", "lib-acct-act"), );
+      form.lastChild.append(button(t("Add"), "action", add), button(t("Cancel"), "", () => { adding = false; draw(); }));
+      box.append(form);
+    };
+    box.redraw = draw;
     draw();
     return box;
   }
@@ -3010,13 +4321,30 @@ magpie.plugin("library", (ctx) => {
       const g = el("div", "lib-grid");
       if (d.transport === "stdio") {
         const line = lineBox([d.command, ...(d.args || [])].filter((x, i) => i > 0 || x).map(quote).join(" "), "npx -y @modelcontextprotocol/server-github", (v) => { const w = words(v); d.command = w[0] || ""; d.args = w.slice(1); });
-        g.append(...field(t("Command"), line, t("The command and its arguments, as you'd type them")));
+        // a synced server can run its own command here (#3836, #6426;
+        // jinpwng on X: one server on a Mac and in WSL, each with its own
+        // path). Its name, agents and note stay the one server; d.shared
+        // is what the other computers run, the line this computer's
+        const cmdBox = el("div", "lib-cmdbox");
+        cmdBox.append(line);
+        const synced = d.shared ? [d.shared.command, ...(d.shared.args || [])].map(quote).join(" ") : "";
+        if (s && s.transport === "stdio" && !d.local && !s.plugin) {
+          cmdBox.append(d.shared
+            ? button(t("Use the synced command"), "lib-addpair", () => { Object.assign(d, { command: d.shared.command, args: [...(d.shared.args || [])], env: { ...(d.shared.env || {}) } }); d.shared = null; draw(); })
+            : button(t("Use another command on this computer"), "lib-addpair", () => {
+              d.shared = { command: s.shared?.command || s.command, args: [...((s.shared || s).args || [])], env: { ...((s.shared || s).env || {}) } };
+              draw();
+              slot.querySelector(".lib-cmd")?.focus();
+            }));
+        }
+        g.append(...field(t("Command"), cmdBox, d.shared ? t("This computer's own, with its environment below. Your other computers run {cmd}", { cmd: synced }) : t("The command and its arguments, as you'd type them")));
         g.append(...field(t("Environment"), pairs(d.env, "GITHUB_TOKEN", t("value"), (v) => { d.env = v; drawAgents(); }), refHint()));
       } else {
         const url = field2(d.url, "https://example.com/mcp", (v) => { d.url = v.trim(); signBox?.redraw(); });
         url.classList.add("mono");
         g.append(...field("URL", url));
         g.append(...field(t("Headers"), pairs(d.headers, "Authorization", "Bearer …", (v) => { d.headers = v; drawAgents(); }), refHint()));
+        if (s && s.transport === d.transport && s.url) g.append(...field(t("Accounts"), headerAccounts(s.name)));
         // Sign in saves the form first when it is of another server than
         // the saved one, so a URL just changed (or a server just added) is
         // the one signed in to
@@ -3061,7 +4389,7 @@ magpie.plugin("library", (ctx) => {
     // a sign-in's to be of it
     const send = async () => {
       const body = { old: s ? s.name : "", server: { name: d.name, transport: d.transport, agents: d.agents, startupTimeout: d.startupTimeout || 0, local: !!d.local, hub: d.hub || "", note: d.note || "" } };
-      if (d.transport === "stdio") Object.assign(body.server, { command: d.command, args: d.args, env: d.env });
+      if (d.transport === "stdio") Object.assign(body.server, { command: d.command, args: d.args, env: d.env, shared: d.local ? null : d.shared || null });
       else Object.assign(body.server, { url: d.url, headers: d.headers, oauth: d.transport === "http" && d.oauth?.clientId ? d.oauth : null });
       take(await api("library/servers/save", body));
       const was = s;
@@ -3173,6 +4501,89 @@ magpie.plugin("library", (ctx) => {
     ed.append(bar);
     modal = { save: () => go.click() };
     openLib(ed);
+  }
+
+  // ---------- variables ----------
+
+  // An environment variable the agent's own settings give every run of it
+  // (a proxy, an API base URL): Claude Code's settings.json "env", Codex's
+  // shell_environment_policy.set. It is kept once and written into each
+  // agent picked (env.go); a value the user set in the file is left alone.
+  const envAgentOf = (id) => (lib.envAgents || []).find((x) => x.id === id);
+  const envAgents = () => shownAgents().filter((a) => envAgentOf(a.id));
+  const envBlocked = () => (a) => {
+    const ea = envAgentOf(a.id);
+    if (ea && !ea.no) return "";
+    return ea?.wsl ? t("magpie gives variables only to agents on this computer, not yet to {agent} in WSL", { agent: a.name }) : t("{agent} has no environment settings magpie can write", { agent: a.name });
+  };
+  function renderEnv(body) {
+    body.append(intro(t("An environment variable is set for an agent every time it runs: a proxy, an API base URL. Add it once and magpie writes it into each agent you pick, in that agent's own settings.")));
+    const all = envAgents();
+    const vars = lib.env || [];
+    if (!vars.length) {
+      body.append(empty(t("No environment variables in the library yet"), t("Add one, and pick the agents that get it."), button(t("＋ Add an environment variable"), "action", () => editEnv(null))));
+      return;
+    }
+    const list = el("div", "list lib-list");
+    list.append(...[...vars].sort((a, b) => a.name.localeCompare(b.name)).map((v) => envRow(v, all)));
+    body.append(list);
+    const after = el("div", "after-list");
+    after.append(button(t("＋ Add environment variable"), "", () => editEnv(null)));
+    body.append(after);
+  }
+  function envRow(v, all) {
+    const row = el("div", "row lib-row click lib-env");
+    const who = el("div", "who");
+    who.append(el("div", "name mono", v.name));
+    const val = el("div", "sub mono lib-envval", v.value);
+    val.title = v.value;
+    who.append(val);
+    row.append(glyph(GLYPH.hook), who, ...removeAct(() => confirmRemoveEnv(v)),
+      agentChips(withGone(all, v.agents), v.agents, chipsChange("env/agents", v.name, "env", (x) => envRow(x, all)), { problems: v.problems, blocked: envBlocked(), all: true }));
+    row.onclick = () => editEnv(v);
+    row.title = t("Edit {name}", { name: v.name });
+    return row;
+  }
+  function editEnv(v) {
+    const all = envAgents();
+    const d = v ? { name: v.name, value: v.value, agents: [...(v.agents || [])] } : { name: "", value: "", agents: all.filter((a) => !envBlocked()(a)).map((a) => a.id) };
+    const ed = el("div", "editor lib-editor lib-envedit");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.hook), el("b", "", v ? v.name : t("New environment variable")));
+    ed.append(head);
+    const err = el("div", "editor-error");
+    const name = field2(d.name, t("e.g. HTTPS_PROXY"), (x) => { d.name = x.trim(); });
+    name.classList.add("mono");
+    ed.append(...field(t("Name"), name, t("Letters, digits and _")));
+    const val = field2(d.value, t("e.g. http://127.0.0.1:7890"), (x) => { d.value = x; });
+    val.classList.add("mono");
+    ed.append(...field(t("Value"), val));
+    const agentsBox = el("div");
+    ed.append(...field(t("Agents"), agentsBox), err);
+    const drawAgents = () => agentsBox.replaceChildren(agentChips(all, d.agents, (next) => { d.agents = next; drawAgents(); }, { names: true, blocked: envBlocked(), all: true }));
+    drawAgents();
+    const bar = el("div", "bar");
+    if (v) bar.append(button(t("Remove from the library"), "danger", async () => {
+      if (!await confirmRemoval(v.name, "It will be removed from the library and the agents it was given to.")) return;
+      if (await change("env/remove", { name: v.name }, t("{name} is out of the library and the agents it was given to", { name: v.name }))) closeLibModal(true);
+    }));
+    bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal));
+    const save = async () => {
+      err.textContent = "";
+      try {
+        const env = { name: d.name, value: d.value, agents: d.agents.filter((id) => !envBlocked()(agentOf(id) || { id })) };
+        take(await api("library/env/save", { old: v ? v.name : "", env }));
+        report(lib.result, v ? t("{name} saved", { name: d.name }) : "");
+        closeLibModal(true);
+        render();
+      } catch (e) { err.textContent = e.message; }
+    };
+    bar.append(button(v ? t("Save") : t("Add"), "primary", save));
+    ed.append(bar);
+    const original = JSON.stringify(d);
+    modal = { save, dirty: () => JSON.stringify(d) !== original };
+    openLib(ed);
+    if (!v) requestAnimationFrame(() => name.focus());
   }
 
   // ---------- hooks ----------
@@ -3456,6 +4867,7 @@ magpie.plugin("library", (ctx) => {
     const all = subagentAgents();
     const subs = lib.subagents || [];
     pickingFor("subagents", []);
+    body.append(subagentFind());
     if (!subs.length) {
       body.append(empty(t("No subagents in the library yet"), t("Add one, and pick the agents that can hand it a task."), button(t("＋ Add a subagent"), "action", () => editSubagent(null))));
     } else {
@@ -3479,6 +4891,120 @@ magpie.plugin("library", (ctx) => {
     if (subs.some((s) => s.agents?.includes("cursor"))) body.append(el("p", "lib-aside lib-subagents-cursor", t("The Cursor app has these subagents; its cursor-agent command reads only a project's own .cursor/agents.")));
     const skip = all.filter((a) => subagentAgentOf(a.id).no);
     if (skip.length) body.append(el("p", "lib-aside lib-subagents-no", t("magpie can't give subagents to {agents} yet: their chips are greyed, and say why.", { agents: skip.map((a) => a.name).join(", ") })));
+    if (!agentless() && (subs.length || lib.projects.length)) renderProjects(body, "subagents");
+  }
+
+  // subagents from a repository (CHENGJIAHEGOXIS on X): a link to one,
+  // a folder or a file in one, or a folder here; each Markdown file with
+  // a name and a description is one (library/subagent_import.go)
+  let saProbe = null;    // { source, found, pick:Set, agents, filter } or { source, error }
+  let saProbing = false;
+  const saPickable = (x) => !x.state || x.state === "update";
+
+  function subagentFind() {
+    const card = el("div", "list lib-card lib-install lib-safind");
+    const line = el("div", "lib-find");
+    const inp = el("input");
+    inp.type = "text";
+    inp.dataset.lib = "sasource";
+    inp.placeholder = t("owner/repo, a GitHub or GitLab link, any git repository's address, or a folder on this computer");
+    inp.spellcheck = false;
+    inp.autocomplete = "off";
+    inp.value = saProbe?.source || "";
+    const go = button(saProbing ? t("Looking…") : t("Find subagents"), "action", () => find());
+    go.disabled = saProbing;
+    if (saProbing) go.classList.add("busy");
+    inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") find(); else if (e.key === "Escape" && saProbe) { saProbe = null; render(); } };
+    line.append(glyph(GLYPH.search, "lib-mini"), inp, go);
+    card.append(line);
+    async function find() {
+      const src = inp.value.trim();
+      if (!src || saProbing) return;
+      saProbing = true;
+      saProbe = { source: src };
+      render();
+      try {
+        const f = await api("library/subagents/probe", { source: src });
+        const fresh = f.candidates.filter(saPickable);
+        saProbe = { source: src, found: f, pick: new Set((fresh.length <= 3 ? fresh : []).map((c) => c.path)), agents: subagentAgents().filter((a) => !subagentBlocked(a)).map((a) => a.id), filter: "" };
+      } catch (e) {
+        saProbe = { source: src, error: e.message };
+      }
+      saProbing = false;
+      render();
+    }
+    if (saProbe?.error) card.append(el("div", "lib-err", saProbe.error));
+    if (saProbe?.found) card.append(subagentPicks(saProbe));
+    return card;
+  }
+
+  function subagentPicks(p) {
+    const box = el("div", "lib-probe");
+    const c = p.found.candidates;
+    const left = (p.found.left || []).map((x) => el("div", "lib-none lib-left", t("{path} left out: {error}", { path: x.path, error: x.error })));
+    const head = el("div", "lib-probehead");
+    const src = p.found.kind === "github" ? "github.com/" + p.found.source.replace(/^https?:\/\/(www\.)?github\.com\//, "")
+      : p.found.kind === "git" ? p.found.source.replace(/^https:\/\//, "") : tilde(p.found.source);
+    head.append(el("span", "note", c.length === 1 ? t("1 subagent in {src}", { src }) : t("{count} subagents in {src}", { count: c.length, src })));
+    head.append(el("span", "grow"));
+    const fresh = c.filter(saPickable);
+    if (fresh.length > 1) {
+      const allOn = fresh.every((x) => p.pick.has(x.path));
+      head.append(button(allOn ? t("Select none") : t("Select all"), "", () => { for (const x of fresh) allOn ? p.pick.delete(x.path) : p.pick.add(x.path); render(); }));
+    }
+    box.append(head);
+    if (c.length > 8) {
+      const f = el("input", "lib-filter");
+      f.type = "text";
+      f.dataset.lib = "safilter";
+      f.placeholder = t("Filter…");
+      f.value = p.filter;
+      f.oninput = () => { p.filter = f.value; drawList(); };
+      f.onkeydown = (e) => e.stopPropagation();
+      box.append(f);
+    }
+    const list = el("div", "lib-picks");
+    const drawList = () => {
+      list.replaceChildren();
+      const q = p.filter.toLowerCase();
+      for (const x of c) {
+        if (q && !(x.name + " " + x.description + " " + x.path).toLowerCase().includes(q)) continue;
+        const r = el("label", "lib-pick lib-sapick" + (saPickable(x) ? "" : " dim"));
+        const cb = el("input");
+        cb.type = "checkbox";
+        cb.checked = p.pick.has(x.path);
+        cb.disabled = !saPickable(x);
+        cb.onchange = () => { if (cb.checked) p.pick.add(x.path); else p.pick.delete(x.path); syncGo(); };
+        const w = el("span", "who");
+        w.append(el("span", "name mono", x.as || x.name), el("span", "sub", x.description));
+        r.append(cb, w);
+        if (x.state === "have") r.append(tag(t("in the library"), ""));
+        else if (x.state === "update") r.append(tag(t("Changed upstream"), "lib-as", t("Importing it again updates its description and prompt, and keeps its agents.")));
+        else if (x.state === "edited") r.append(tag(t("Changed here"), "lib-as", t("You changed it here, so importing it again leaves it as it is.")));
+        else if (x.as) r.append(tag(t("adds as {name}", { name: x.as }), "lib-as", t("The library has another subagent called {name}. This one goes in beside it as {as}.", { name: x.name, as: x.as })));
+        list.append(r);
+      }
+    };
+    drawList();
+    box.append(list, ...left);
+    if (!c.length) return box;
+    const foot = el("div", "lib-probefoot");
+    const agentsBox = el("div");
+    const drawAgents = () => agentsBox.replaceChildren(agentChips(subagentAgents(), p.agents, (n) => { p.agents = n; drawAgents(); }, { names: false, all: true, blocked: subagentBlocked }));
+    drawAgents();
+    foot.append(el("span", "note", t("for")), agentsBox, el("span", "grow"));
+    foot.append(button(t("Cancel"), "", () => { saProbe = null; render(); }));
+    const go = button("", "primary", async () => {
+      go.disabled = true;
+      go.textContent = t("Importing…");
+      if (await change("subagents/import", { source: p.source, paths: [...p.pick], agents: p.agents.filter((id) => !subagentBlocked(agentOf(id) || { id })) })) { saProbe = null; render(); }
+      else { go.disabled = false; syncGo(); }
+    });
+    const syncGo = () => { const n = p.pick.size; go.textContent = n === 1 ? t("Import 1 subagent") : t("Import {count} subagents", { count: n }); go.disabled = !n; };
+    syncGo();
+    foot.append(go);
+    box.append(foot);
+    return box;
   }
 
   function subagentRow(s, all) {
@@ -3621,6 +5147,406 @@ magpie.plugin("library", (ctx) => {
     if (!s) requestAnimationFrame(() => name.focus());
   }
 
+  // ---------- slash commands ----------
+
+  // A slash command (miantiao_me on X) is a prompt typed as /name in an
+  // agent: the words after the name go where it says $ARGUMENTS, and the
+  // first, second… of them where it says $1, $2…. It is kept once and
+  // written into each agent picked, as that agent's own command file in
+  // its own folder and shape (commands.go). Codex is listed, greyed: it
+  // reads custom prompts no more.
+  const commandAgentOf = (id) => (lib.commandAgents || []).find((x) => x.id === id);
+  const commandAgents = () => shownAgents().filter((a) => commandAgentOf(a.id));
+  // why a can't be given a slash command, or ""
+  const commandBlocked = (a) => {
+    const ca = commandAgentOf(a.id);
+    if (ca && !ca.no) return "";
+    if (ca?.wsl) return t("magpie gives slash commands only to agents on this computer, not yet to {agent} in WSL", { agent: a.name });
+    if (a.id === "codex") return t("Codex reads custom prompts no more: its skills took their place");
+    return t("{agent} reads no slash commands magpie can write", { agent: a.name });
+  };
+  // a prompt that takes words by their place ($1, $2…; $0 is none)
+  const usesArgs = (p) => /\$(?!0(?![0-9]))[0-9]+/.test(p || "");
+  // the agents of ids that take only $ARGUMENTS
+  const noArgs = (all, ids) => all.filter((a) => ids.includes(a.id) && !commandBlocked(a) && !commandAgentOf(a.id).args);
+
+  function renderCommands(body) {
+    body.append(intro(t("A slash command is a prompt you type as /name in an agent. Add it once and magpie writes it into each agent you pick, as that agent's own command.")));
+    const all = commandAgents();
+    const cmds = lib.commands || [];
+    body.append(commandFind());
+    if (!cmds.length) {
+      body.append(empty(t("No slash commands in the library yet"), t("Add one, and pick the agents that get it."), button(t("＋ Add a slash command"), "action", () => editCommand(null))));
+    } else {
+      const list = el("div", "list lib-list");
+      list.append(...[...cmds].sort((a, b) => a.name.localeCompare(b.name)).map((c) => commandRow(c, all)));
+      body.append(list);
+      const after = el("div", "after-list");
+      after.append(button(t("＋ Add slash command"), "", () => editCommand(null)));
+      body.append(after);
+    }
+    const noPlace = [...new Set(cmds.filter((c) => usesArgs(c.prompt)).flatMap((c) => noArgs(all, c.agents || [])))];
+    if (noPlace.length) body.append(el("p", "lib-aside lib-commands-noargs", t("{agents} take only $ARGUMENTS, all the words at once: a command that uses $1, $2… isn't written for them.", { agents: noPlace.map((a) => a.name).join(", ") })));
+    const skip = all.filter((a) => commandAgentOf(a.id).no);
+    if (skip.length) body.append(el("p", "lib-aside lib-commands-no", t("magpie can't give slash commands to {agents}: their chips are greyed, and say why.", { agents: skip.map((a) => a.name).join(", ") })));
+  }
+
+  // the slash commands the user already made in their agents (miantiao_me
+  // on X: "can the ones I made in Pi be imported?"), each agent's own
+  // files read as magpie's (library/command_import.go); importing keeps
+  // each file as it is, the agents it came from ticked
+  let cmdProbe = null;    // { found, pick:Set, filter } or { error }
+  let cmdProbing = false;
+  const cmdPickable = (x) => x.state !== "taken";
+
+  function commandFind() {
+    const card = el("div", "list lib-card lib-install lib-cmdfind");
+    const line = el("div", "lib-find");
+    const go = button(cmdProbing ? t("Looking…") : t("Find in agents"), "action", () => find());
+    go.disabled = cmdProbing;
+    if (cmdProbing) go.classList.add("busy");
+    line.append(glyph(GLYPH.search, "lib-mini"), el("span", "lib-findnote", t("Slash commands you made in your agents")), go);
+    card.append(line);
+    async function find() {
+      if (cmdProbing) return;
+      cmdProbing = true;
+      cmdProbe = null;
+      render();
+      try {
+        const f = await api("library/commands/probe", {});
+        // ticked: each new name's first, one of those saying different things
+        const pick = new Set(), names = new Set();
+        for (const x of f.candidates) if (!x.state && !names.has(x.name)) { names.add(x.name); pick.add(x.path); }
+        cmdProbe = { found: f, pick, filter: "" };
+      } catch (e) {
+        cmdProbe = { error: e.message };
+      }
+      cmdProbing = false;
+      render();
+    }
+    if (cmdProbe?.error) card.append(el("div", "lib-err", cmdProbe.error));
+    if (cmdProbe?.found) card.append(commandPicks(cmdProbe));
+    return card;
+  }
+
+  function commandPicks(p) {
+    const box = el("div", "lib-probe");
+    const c = p.found.candidates;
+    const left = (p.found.left || []).map((x) => el("div", "lib-none lib-left", t("{path} left out: {error}", { path: tilde(x.path), error: x.error })));
+    const head = el("div", "lib-probehead");
+    head.append(el("span", "note", !c.length ? t("No slash commands of your own in your agents") : c.length === 1 ? t("1 slash command in your agents") : t("{count} slash commands in your agents", { count: c.length })));
+    head.append(el("span", "grow"));
+    if (!c.length) {
+      head.append(button(t("Close"), "", () => { cmdProbe = null; render(); }));
+      box.append(head, ...left);
+      return box;
+    }
+    box.append(head);
+    if (c.length > 8) {
+      const f = el("input", "lib-filter");
+      f.type = "text";
+      f.dataset.lib = "cmdfilter";
+      f.placeholder = t("Filter…");
+      f.value = p.filter;
+      f.oninput = () => { p.filter = f.value; drawList(); };
+      f.onkeydown = (e) => e.stopPropagation();
+      box.append(f);
+    }
+    const list = el("div", "lib-picks");
+    const drawList = () => {
+      list.replaceChildren();
+      const q = p.filter.toLowerCase();
+      for (const x of c) {
+        const from = x.agents.map((id) => agentOf(id)?.name || id).join(" · ");
+        if (q && !(x.name + " " + x.description + " " + from).toLowerCase().includes(q)) continue;
+        const r = el("label", "lib-pick lib-cmdpick" + (cmdPickable(x) ? "" : " dim"));
+        const cb = el("input");
+        cb.type = "checkbox";
+        cb.checked = p.pick.has(x.path);
+        cb.disabled = !cmdPickable(x);
+        cb.onchange = () => {
+          if (cb.checked) {
+            // one of those called the same
+            for (const y of c) if (y.name === x.name) p.pick.delete(y.path);
+            p.pick.add(x.path);
+          } else p.pick.delete(x.path);
+          drawList();
+          syncGo();
+        };
+        const w = el("span", "who");
+        w.append(el("span", "name mono", "/" + x.name));
+        if (x.description) w.append(el("span", "sub", x.description));
+        w.append(el("span", "sub lib-cmdfrom", from));
+        r.append(cb, w);
+        if (x.state === "taken") r.append(tag(t("Name taken"), "lib-as", t("The library has another slash command called /{name}, so this one stays in the agent as it is.", { name: x.name })));
+        else if (x.clash) r.append(tag(t("Differs by agent"), "lib-as", t("/{name} says something else in another agent: pick one.", { name: x.name })));
+        else if (x.state === "same") r.append(tag(t("in the library"), "", t("The library has it saying the same: importing it gives it to these agents too.")));
+        list.append(r);
+      }
+    };
+    drawList();
+    box.append(list, ...left);
+    const foot = el("div", "lib-probefoot");
+    foot.append(el("span", "grow"), button(t("Cancel"), "", () => { cmdProbe = null; render(); }));
+    const go = button("", "primary", async () => {
+      go.disabled = true;
+      go.textContent = t("Importing…");
+      if (await change("commands/import", { paths: [...p.pick] })) { cmdProbe = null; render(); }
+      else { go.disabled = false; syncGo(); }
+    });
+    const syncGo = () => { const n = p.pick.size; go.textContent = n === 1 ? t("Import 1 slash command") : t("Import {count} slash commands", { count: n }); go.disabled = !n; };
+    syncGo();
+    foot.append(go);
+    box.append(foot);
+    return box;
+  }
+
+  function commandRow(c, all) {
+    const row = el("div", "row lib-row click lib-command");
+    const who = el("div", "who");
+    who.append(el("div", "name mono", "/" + c.name));
+    if (c.description) who.append(el("div", "lib-commanddesc", c.description));
+    row.append(glyph(GLYPH.command), who,
+      agentChips(all, c.agents, chipsChange("commands/agents", c.name, "commands", (x) => commandRow(x, all)), { problems: c.problems, blocked: commandBlocked, all: true }));
+    row.onclick = () => editCommand(c);
+    row.title = t("Edit {name}", { name: "/" + c.name });
+    return row;
+  }
+
+  function editCommand(c) {
+    const all = commandAgents();
+    const d = c ? { name: c.name, description: c.description || "", prompt: c.prompt, agents: [...(c.agents || [])] }
+      : { name: "", description: "", prompt: "", agents: all.filter((a) => !commandBlocked(a)).map((a) => a.id) };
+    const ed = el("div", "editor lib-editor lib-commandedit");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.command), el("b", "", c ? "/" + c.name : t("New slash command")));
+    ed.append(head);
+    const err = el("div", "editor-error");
+    const name = field2(d.name, t("e.g. review"), (v) => { d.name = v.trim(); });
+    name.classList.add("mono");
+    ed.append(...field(t("Name"), name, t("Typed as /name: lowercase letters, digits, - and _")));
+    const box = (cls, value, placeholder, rows, max, onEnter) => {
+      const ta = el("textarea", "lib-text small " + cls);
+      ta.value = value;
+      ta.placeholder = placeholder;
+      ta.spellcheck = false;
+      ta.rows = rows;
+      ta.maxLength = max;
+      ta.onkeydown = (e) => { e.stopPropagation(); if (e.isComposing || e.keyCode === 229) return; if (e.key === "Escape") closeLibModal(); else if (onEnter && e.key === "Enter" && modal?.save) { e.preventDefault(); modal.save(); } };
+      autosize(ta, rows * 20);
+      return ta;
+    };
+    // one line, as the agents list it (library.SaveCommand joins its
+    // lines), so Enter saves; the prompt's Enter is a new line
+    const desc = box("lib-commanddescin", d.description, t("e.g. Review a diff for bugs"), 1, 1000, true);
+    desc.oninput = () => { d.description = desc.value; };
+    ed.append(...field(t("Description"), desc));
+    const prompt = box("lib-commandprompt", d.prompt, t("Review $ARGUMENTS for bugs. Report only what is wrong."), 6, 100000, false);
+    const argsHint = el("div", "hint lib-commandhint-args");
+    prompt.oninput = () => { d.prompt = prompt.value; drawHint(); };
+    const [pl, pw] = field(t("Prompt"), prompt, t("$ARGUMENTS is what you type after the name; $1, $2… its first, second… word"));
+    pw.append(argsHint);
+    ed.append(pl, pw);
+    const agentsBox = el("div");
+    ed.append(...field(t("Agents"), agentsBox));
+    ed.append(err);
+    function drawHint() {
+      const no = usesArgs(d.prompt) ? noArgs(all, d.agents) : [];
+      argsHint.textContent = no.length ? t("Not written for {agents} while it uses $1, $2…: they take only $ARGUMENTS", { agents: no.map((a) => a.name).join(", ") }) : "";
+    }
+    function drawAgents() {
+      agentsBox.replaceChildren(agentChips(all, d.agents, (next) => { d.agents = next; drawAgents(); }, { names: true, blocked: commandBlocked, all: true }));
+      drawHint();
+    }
+    drawAgents();
+
+    const bar = el("div", "bar");
+    if (c) bar.append(button(t("Remove from the library"), "danger", async () => {
+      if (!await confirmRemoval("/" + c.name, "It will be removed from the library and the agents it was given to.")) return;
+      if (await change("commands/remove", { name: c.name }, t("{name} is out of the library and the agents it was given to", { name: "/" + c.name }))) closeLibModal(true);
+    }));
+    bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal));
+    const save = async () => {
+      err.textContent = "";
+      try {
+        const command = { name: d.name.replace(/^\//, ""), description: d.description.trim(), prompt: d.prompt, agents: d.agents.filter((id) => !commandBlocked(agentOf(id) || { id })) };
+        take(await api("library/commands/save", { old: c ? c.name : "", command }));
+        report(lib.result, c ? t("{name} saved", { name: "/" + command.name }) : "");
+        closeLibModal(true);
+        render();
+      } catch (e) { err.textContent = e.message; }
+    };
+    bar.append(button(c ? t("Save") : t("Add"), "primary", save));
+    ed.append(bar);
+    const original = JSON.stringify(d);
+    modal = { save, dirty: () => JSON.stringify(d) !== original };
+    openLib(ed);
+    if (!c) requestAnimationFrame(() => name.focus());
+  }
+
+  // ---------- Claude plugins ----------
+
+  // A Claude Code plugin kept as one item (FakeshadowzZ on X): its skills,
+  // MCP servers, hooks and subagents are ordinary library items marked with
+  // the plugin, so each agent gets them through the code that writes that
+  // kind, and the other tabs go on listing them. The plugin's switch, its
+  // agents and Remove act on every part at once (library/plugin.go).
+  let plProbe = null;    // plugins found at an address: { source, found, pick:Set, agents }
+  let plProbing = false;
+  const pluginParts = (p) => [
+    p.skills?.length ? t("Skills: {names}", { names: p.skills.join(", ") }) : "",
+    p.mcp?.length ? t("MCP servers: {names}", { names: p.mcp.join(", ") }) : "",
+    p.hooks?.length ? t("Hooks: {names}", { names: p.hooks.join(", ") }) : "",
+    p.subagents?.length ? t("Subagents: {names}", { names: p.subagents.join(", ") }) : "",
+  ].filter(Boolean).join(" · ");
+
+  function renderPlugins(body) {
+    body.append(intro(t("A Claude Code plugin is skills, MCP servers, hooks and subagents in one package. Install it once: magpie gives each part to the agents you pick, and you turn the plugin on, off or remove it as a whole. Its parts also show under their own tabs.")));
+    body.append(pluginFind());
+    const all = shownAgents();
+    const plugins = lib.plugins || [];
+    if (!plugins.length) {
+      body.append(empty(t("No Claude plugins in the library yet"), t("Install one from a folder, a git address or a marketplace.json.")));
+      return;
+    }
+    const list = el("div", "list lib-list");
+    list.append(...[...plugins].sort((a, b) => a.name.localeCompare(b.name)).map((p) => pluginRow(p, all)));
+    body.append(list);
+  }
+
+  function pluginFind() {
+    const card = el("div", "list lib-card lib-install lib-plfind");
+    const line = el("div", "lib-find");
+    const inp = el("input");
+    inp.type = "text";
+    inp.dataset.lib = "plsource";
+    inp.placeholder = t("owner/repo, a git address, or a folder with a plugin or a marketplace.json");
+    inp.spellcheck = false;
+    inp.autocomplete = "off";
+    inp.value = plProbe?.source || "";
+    const go = button(plProbing ? t("Looking…") : t("Find plugins"), "action", () => find());
+    go.disabled = plProbing;
+    if (plProbing) go.classList.add("busy");
+    inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") find(); else if (e.key === "Escape" && plProbe) { plProbe = null; render(); } };
+    line.append(glyph(GLYPH.search, "lib-mini"), inp, go);
+    card.append(line);
+    async function find() {
+      const src = inp.value.trim();
+      if (!src || plProbing) return;
+      plProbing = true;
+      plProbe = { source: src };
+      render();
+      try {
+        const f = await api("library/plugins/probe", { source: src });
+        const fresh = f.candidates.filter((c) => !c.have);
+        plProbe = { source: src, found: f, pick: new Set((fresh.length === 1 ? fresh : []).map((c) => c.name)), agents: shownAgents().map((a) => a.id) };
+        if (!f.candidates.length) status(t("No Claude plugin found there"), "warn");
+      } catch (e) {
+        plProbe = { source: src, error: e.message };
+      }
+      plProbing = false;
+      render();
+    }
+    if (plProbe?.error) card.append(el("div", "lib-err", plProbe.error));
+    if (plProbe?.found?.candidates.length) card.append(pluginPicks(plProbe));
+    return card;
+  }
+
+  function pluginPicks(p) {
+    const box = el("div", "lib-probe");
+    const list = el("div", "lib-picks");
+    for (const x of p.found.candidates) {
+      const r = el("label", "lib-pick lib-plpick" + (x.have ? " dim" : ""));
+      const cb = el("input");
+      cb.type = "checkbox";
+      cb.checked = p.pick.has(x.name);
+      cb.onchange = () => { if (cb.checked) p.pick.add(x.name); else p.pick.delete(x.name); syncGo(); };
+      const w = el("span", "who");
+      w.append(el("span", "name", x.name), el("span", "sub", x.description || ""));
+      const count = (n) => (n ? [String(n)] : []);
+      const parts = x.remote ? t("Fetched from its own repository when installed")
+        : pluginParts({ skills: count(x.skills), mcp: count(x.mcp), hooks: count(x.hooks), subagents: count(x.subagents) });
+      if (parts) w.append(el("span", "sub lib-plparts", parts));
+      r.append(cb, w);
+      if (x.have) r.append(tag(t("in the library"), ""));
+      list.append(r);
+    }
+    box.append(list);
+    const foot = el("div", "lib-probefoot");
+    const agentsBox = el("div");
+    const drawAgents = () => agentsBox.replaceChildren(agentChips(shownAgents(), p.agents, (n) => { p.agents = n; drawAgents(); }, { names: false, all: true }));
+    drawAgents();
+    foot.append(el("span", "note", t("for")), agentsBox, el("span", "grow"));
+    foot.append(button(t("Cancel"), "", () => { plProbe = null; render(); }));
+    const go = button("", "primary", async () => {
+      go.disabled = true;
+      go.textContent = t("Installing…");
+      const n = p.pick.size;
+      if (await change("plugins/install", { source: p.source, names: [...p.pick], agents: p.agents }, n === 1 ? t("1 plugin installed") : t("{n} plugins installed", { n }))) { plProbe = null; render(); }
+      else { go.disabled = false; syncGo(); }
+    });
+    const syncGo = () => { const n = p.pick.size; go.textContent = n === 1 ? t("Install 1 plugin") : t("Install {n} plugins", { n }); go.disabled = !n; };
+    syncGo();
+    foot.append(go);
+    box.append(foot);
+    return box;
+  }
+
+  function pluginRow(p, all) {
+    const row = el("div", "row lib-row click lib-plugin" + (p.off ? " off" : ""));
+    const who = el("div", "who");
+    who.append(el("div", "name mono", p.name + (p.version ? " " + p.version : "")));
+    if (p.description) who.append(el("div", "lib-subagentdesc", p.description));
+    // counts, not every name: PStack has a hundred (jinpwng on X); the
+    // names are in the dialog, folded
+    const line = [[t("Skills"), p.skills], [t("MCP servers"), p.mcp], [t("Hooks"), p.hooks], [t("Subagents"), p.subagents]]
+      .filter(([, v]) => v?.length).map(([k, v]) => k + " " + v.length).join(" · ");
+    if (line) who.append(el("div", "sub lib-plparts", line));
+    // synced in from another computer, its source not reached here yet
+    if (p.pending) who.append(el("div", "sub lib-plpending", t("Not fetched on this computer yet: Update tries again")));
+    row.append(glyph(GLYPH.folder), who,
+      agentChips(all, p.agents, chipsChange("plugins/agents", p.name, "plugins", (x) => pluginRow(x, all)), { all: true }),
+      toggle(!p.off, t("Turn {name} on or off", { name: p.name }), (v) => change("plugins/on", { name: p.name, on: v },
+        v ? t("{name} is on again", { name: p.name }) : t("{name} is off for every agent", { name: p.name }))));
+    row.onclick = () => pluginDetail(p);
+    row.title = t("Open the plugin {name}", { name: p.name });
+    return row;
+  }
+
+  function pluginDetail(p) {
+    const ed = el("div", "editor lib-editor lib-pldetail");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.folder), el("b", "", p.name));
+    ed.append(head);
+    if (p.description) ed.append(el("p", "lib-subagentdesc", p.description));
+    const rows = [[t("Skills"), p.skills], [t("MCP servers"), p.mcp], [t("Hooks"), p.hooks], [t("Subagents"), p.subagents]].filter(([, v]) => v?.length);
+    for (const [label, names] of rows) {
+      const d = el("details", "lib-plgroup");
+      d.append(el("summary", "", label + " " + names.length), el("div", "mono lib-plnames", names.join(", ")));
+      ed.append(d);
+    }
+    if (p.missing?.length) ed.append(el("div", "hint lib-plmissing", t("Taken out by hand: {names}", { names: p.missing.join(", ") })));
+    if (p.left?.length) {
+      const left = el("div", "lib-plleft");
+      for (const x of p.left) left.append(el("div", "hint", x.what + " — " + x.why));
+      ed.append(...field(t("Not carried"), left));
+    }
+    if (p.source) ed.append(el("div", "hint lib-plsource mono", p.source + (p.pick ? " · " + p.pick : "")));
+    const bar = el("div", "bar");
+    bar.append(button(t("Remove from the library"), "danger", async () => {
+      if (!await confirmRemoval(p.name, "It will be removed from the library, with its skills, MCP servers, hooks and subagents, and from the agents they were given to.")) return;
+      if (await change("plugins/remove", { name: p.name }, t("{name} is out of the library and the agents it was given to", { name: p.name }))) closeLibModal(true);
+    }));
+    bar.append(el("span", "grow"));
+    if (p.source) bar.append(button(t("Update"), "", async () => {
+      if (await change("plugins/update", { name: p.name }, t("{name} read again from its source", { name: p.name }))) closeLibModal(true);
+    }));
+    bar.append(button(t("Cancel"), "", closeLibModal));
+    ed.append(bar);
+    modal = { dirty: () => false };
+    openLib(ed);
+  }
+
   // ---------- skills ----------
 
   function renderSkills(body) {
@@ -3717,7 +5643,7 @@ magpie.plugin("library", (ctx) => {
       drawSkills(box, all);
       body.append(box);
       // under the list, so the skills stay where they were above it
-      if (all.length) body.append(skillHowBar(), skillWhereBar(), ...skillRouterPart());
+      if (all.length) body.append(skillHowBar(), skillWhereBar(), ...skillAutoPart(), ...skillRouterPart());
       if (picking) body.append(pickBar(all));
     }
     if (lib.newSkills?.length) renderNewSkills(body);
@@ -3885,16 +5811,17 @@ magpie.plugin("library", (ctx) => {
   const SKILL_SORTS = () => [["source", t("By source")], ...NAME_SORTS];
   // the groups, and each skill's text to filter by, worked out once for
   // each answer from magpie and each pick
-  let grouped = null;
-  function skillGroups() {
-    const pick = sortOf("libSkills", SKILL_SORTS());
-    if (grouped?.lib === lib && grouped.pick === pick) return grouped.groups;
+  let grouped = {}; // sort → { lib, groups }
+  // bySource: the project picker's grouping, whatever sort the list has
+  function skillGroups(bySource = false) {
+    const pick = bySource ? "source" : sortOf("libSkills", SKILL_SORTS());
+    if (grouped[pick]?.lib === lib) return grouped[pick].groups;
     if (pick !== "source") {
       const skills = [...lib.skills].sort(byName(pick));
       const g = { key: "flat", repo: "", skills, parts: null,
         text: new Map(skills.map((s) => [s, (s.name + " " + (s.note || "") + " " + (s.description || "") + " " + skillRepo(s)).toLowerCase()])) };
-      grouped = { lib, pick, groups: [g] };
-      return grouped.groups;
+      grouped[pick] = { lib, groups: [g] };
+      return grouped[pick].groups;
     }
     // the user's own groups first, in the order made, each skill in its
     // group rather than its source's (#791)
@@ -3943,7 +5870,7 @@ magpie.plugin("library", (ctx) => {
       g.text = new Map(g.skills.map((s) => [s, (s.name + " " + (s.note || "") + " " + (s.description || "") + " " + (g.mine || (g.owner ? skillRepo(s) : g.repo))).toLowerCase()]));
       g.parts = g.mine ? null : partsOf(g);
     }
-    grouped = { lib, pick, groups };
+    grouped[pick] = { lib, groups };
     return groups;
   }
 
@@ -4184,6 +6111,11 @@ magpie.plugin("library", (ctx) => {
       head.append(el("span", "grow"), groupChips(live, all, null));
     }
     head.title = folded ? t("Show its skills") : t("Hide its skills");
+    // a click draws it anew, and the first part's only neighbour above is
+    // the list's empty pad: the page held the next part's heading, pushed
+    // down by the rows opened, and scrolled the clicked one away
+    // (jinpwng on X). Held is its list instead, whose top doesn't move.
+    head.dataset.unrolls = "";
     head.onclick = () => {
       if (filtering) { if (folded) unfiltered.delete(fk); else unfiltered.add(fk); }
       else { folds[fk] = !folded; saveFolds(); }
@@ -4309,7 +6241,7 @@ magpie.plugin("library", (ctx) => {
       for (const g of by.values()) v = await api("library/" + kind + "/agents-some", { names: g.names, agents: g.agents, on });
       return v;
     };
-    const box = agentChips(all, full, async (next) => {
+    const change = async (next) => {
       const on = next.filter((id) => !full.includes(id)), off = full.filter((id) => !next.includes(id));
       box.classList.add("busy");
       try {
@@ -4333,11 +6265,20 @@ magpie.plugin("library", (ctx) => {
         status(e.message, "err", 6000);
       }
       render();
-    }, { all: true, blocked: servers ? (a) => (reach(a) ? "" : n === 1 ? sseBlocked(skills[0])(a) : t("{agent} can reach none of these servers", { agent: a.name }))
+    };
+    // an agent's profiles are one chip here too (Yanzhongixuy on X: a
+    // repository's heading drew an icon for each of twenty Hermes profiles)
+    change.rows = true;
+    const box = agentChips(all, full, change, { all: true, blocked: servers ? (a) => (reach(a) ? "" : n === 1 ? sseBlocked(skills[0])(a) : t("{agent} can reach none of these servers", { agent: a.name }))
       : hooks ? (a) => (reach(a) ? "" : n === 1 ? hookBlocked(skills[0])(a) : t("{agent} can run none of these hooks", { agent: a.name })) : null,
     always: servers || hooks || !n ? null : (a) => (reach(a) ? "" : n === 1 ? alwaysFor(skills[0])(a)
       : t("{agent} reads ~/.agents/skills itself, where all of these are kept — it has them whatever is ticked here", { agent: a.name })) });
     box.classList.add("lib-groupchips");
+    // a profiles chip is half lit when a profile of it has some of the skills
+    for (const c of box.querySelectorAll(".lib-ag[data-members]")) {
+      const ms = idsOf(c).map((id) => all.find((x) => x.id === id)).filter((a) => a && reach(a));
+      if (ms.some((a) => count(a) && count(a) < reach(a)) || (ms.some((a) => count(a)) && !c.classList.contains("on"))) c.classList.add("some");
+    }
     for (const c of box.querySelectorAll(".lib-ag[data-agent]")) {
       const a = all.find((x) => x.id === c.dataset.agent), k = count(a), m = reach(a);
       if (!m) continue;
@@ -4788,6 +6729,11 @@ magpie.plugin("library", (ctx) => {
   // MCP tab lists the same projects with the servers.
   let addingProject = null;       // the folder being added: { dir, error, busy }
   const openProjects = new Set(); // projects whose skills (or servers) are shown
+  // An open project's card lists the skills it has, not every library
+  // skill as though each were in it (POM_JUMPING on X): its menu picks
+  // which go in. A row whose chips are switched off stays till the card is
+  // closed, so it doesn't vanish under the pointer.
+  const projectShown = new Map(); // project dir → the skills its open card lists
   const projectAgents = () => shownAgents().filter((a) => a.projectSkills);
   // a project's file may take less than the agent's own: Pi's .pi/mcp.json
   // no SSE, whatever extension its user-wide file is for
@@ -4796,12 +6742,16 @@ magpie.plugin("library", (ctx) => {
 
   function renderProjects(body, kind) {
     const rh = el("div", "row-head");
-    rh.append(el("span", "label", t("In projects")), el("span", "grow"));
+    rh.append(el("span", "label", kind === "skills" ? t("Project skills") : kind === "subagents" ? t("Project subagents") : kind === "instructions" ? t("Project instructions") : t("Project servers")), el("span", "grow"));
     if (!addingProject) rh.append(button(t("Add a project"), "action lib-updall", () => { addingProject = { dir: "" }; render(); }));
     body.append(rh);
     if (addingProject) body.append(addProjectCard(kind));
     if (!lib.projects.length && !addingProject) {
-      body.append(el("p", "lib-aside", kind === "mcp"
+      body.append(el("p", "lib-aside", kind === "instructions"
+        ? t("Give a project instructions of its own: magpie writes them into the AGENTS.md, CLAUDE.md or the like each agent reads there, leaving the rest of each file as it is.")
+        : kind === "subagents"
+        ? t("Give a project's agents some of these subagents as the project's own: magpie writes them into its .claude/agents and the like, and keeps them out of git.")
+        : kind === "mcp"
         ? t("Give a project's agents some of these servers as the project's own: magpie writes them into its {files}, leaving the rest of each file as it is.", { files: projectFiles() })
         : t("Give a project's agents some of these skills as the project's own: magpie links them into its .claude/skills and .agents/skills and keeps them out of git.")));
       return;
@@ -4848,7 +6798,7 @@ magpie.plugin("library", (ctx) => {
         addingProject = null;
         const p = lib.projects.find((x) => !was.has(x.dir));
         if (p) openProjects.add(p.dir);
-        status(kind === "mcp" ? t("{name} added — pick the servers it gets", { name: p?.name || dir }) : t("{name} added — pick the skills it gets", { name: p?.name || dir }), "ok");
+        status(kind === "instructions" ? t("{name} added — write its instructions", { name: p?.name || dir }) : kind === "subagents" ? t("{name} added — pick the subagents it gets", { name: p?.name || dir }) : kind === "mcp" ? t("{name} added — pick the servers it gets", { name: p?.name || dir }) : t("{name} added — pick the skills it gets", { name: p?.name || dir }), "ok");
       } catch (e) {
         a.busy = false;
         a.error = e.message;
@@ -4859,24 +6809,32 @@ magpie.plugin("library", (ctx) => {
   }
 
   function projectCard(p, kind) {
-    const mcp = kind === "mcp";
+    const mcp = kind === "mcp", sub = kind === "subagents", ins = kind === "instructions";
     const card = el("div", "list lib-card lib-project" + (p.missing ? " missing" : ""));
     const isOpen = openProjects.has(p.dir);
     const head = el("div", "row lib-row click lib-projhead" + (isOpen ? " open" : ""));
     const who = el("div", "who");
     const nm = el("div", "name", p.name);
     if (p.missing) nm.append(tag(t("Folder is gone"), "warn"));
-    else if (p.copy && !mcp) nm.append(tag(t("Copies"), ""));
+    else if (p.copy && !mcp && !sub && !ins) nm.append(tag(t("Copies"), ""));
     who.append(nm);
     const src = el("div", "lib-src");
     src.append(pathLink(p.dir));
     who.append(src);
-    const names = Object.keys((mcp ? p.servers : p.skills) || {}).sort();
+    const names = Object.keys((sub ? p.subagents : mcp ? p.servers : p.skills) || {}).sort();
     const pills = el("div", "lib-tags");
-    if (!isOpen) {
+    if (!isOpen && ins) {
+      const first = (projTexts[p.dir] ?? p.instr ?? "").split("\n").find((l) => l.trim())?.replace(/^#+\s*/, "") || "";
+      if (!first) pills.append(tag(t("No instructions yet"), "lib-unchecked"));
+      else {
+        pills.append(tag(first.length > 40 ? first.slice(0, 39) + "…" : first, "lib-dot"));
+        if (!(p.instrAgents || []).length) pills.append(tag(t("For no agent"), "lib-unchecked"));
+        if (projTexts[p.dir] !== undefined && projTexts[p.dir] !== (p.instr || "")) pills.append(tag(t("Not saved yet"), "warn"));
+      }
+    } else if (!isOpen) {
       for (const n of names.slice(0, 4)) pills.append(tag(n, "lib-dot"));
       if (names.length > 4) pills.append(tag("+" + (names.length - 4), ""));
-      if (!names.length) pills.append(tag(mcp ? t("No servers yet") : t("No skills yet"), "lib-unchecked"));
+      if (!names.length) pills.append(tag(sub ? t("No subagents yet") : mcp ? t("No servers yet") : t("No skills yet"), "lib-unchecked"));
     }
     const acts = el("div", "lib-rowacts");
     const rm = button("", "lib-icon danger", () => confirmRemoveProject(p));
@@ -4886,12 +6844,14 @@ magpie.plugin("library", (ctx) => {
     const chev = el("span", "chev");
     chev.append(svg(CHEV_R, 11, 1.7));
     head.append(glyph(GLYPH.folder), who, pills, acts, chev);
-    head.onclick = () => { isOpen ? openProjects.delete(p.dir) : openProjects.add(p.dir); render(); };
-    head.title = mcp ? (isOpen ? t("Hide its servers") : t("Pick the servers it gets")) : isOpen ? t("Hide its skills") : t("Pick the skills it gets");
+    head.onclick = () => { isOpen ? openProjects.delete(p.dir) : openProjects.add(p.dir); projectShown.delete(p.dir); render(); };
+    head.title = ins ? (isOpen ? t("Hide its instructions") : t("Write its instructions")) : sub ? (isOpen ? t("Hide its subagents") : t("Pick the subagents it gets")) : mcp ? (isOpen ? t("Hide its servers") : t("Pick the servers it gets")) : isOpen ? t("Hide its skills") : t("Pick the skills it gets");
     card.append(head);
     if (p.problems?.[""]) card.append(el("div", "lib-err", p.problems[""]));
     if (!isOpen) return card;
     if (mcp) return projectServers(p, card);
+    if (sub) return projectSubagents(p, card);
+    if (ins) return projectInstructions(p, card);
 
     const opts = el("div", "lib-projopts");
     const copy = toggle(p.copy, t("Copy files instead of linking"), (on) =>
@@ -4903,10 +6863,17 @@ magpie.plugin("library", (ctx) => {
     opts.append(lab, el("span", "note", p.copy
       ? t("Copies are made again whenever the library's skill changes; edits made to them are replaced.")
       : t("Links follow the library's skill: an update reaches the project at once.")));
+    const all = projectAgents();
+    const shown = projectShown.get(p.dir) || new Set();
+    projectShown.set(p.dir, shown);
+    const has = (s) => !!(p.skills[s.name]?.length || p.problems?.[s.name] || p.skillsOff?.[s.name]?.length);
+    for (const s of lib.skills) if (has(s)) shown.add(s.name);
+    opts.append(projectSkillsPick(p, all, has));
     card.append(opts);
 
-    const all = projectAgents();
-    for (const s of lib.skills) {
+    const listed = lib.skills.filter((s) => shown.has(s.name));
+    if (!listed.length) card.append(el("p", "lib-aside lib-projfoot lib-projnone", t("No skills yet")));
+    for (const s of listed) {
       const row = el("div", "row lib-row lib-projskill");
       const w = el("div", "who");
       const n = el("div", "name", s.name);
@@ -4919,25 +6886,84 @@ magpie.plugin("library", (ctx) => {
       const on = p.skills[s.name] || [];
       // an agent reading the same folder as one that has it has it too
       const via = (a) => { const o = on.find((id) => agentOf(id)?.projectSkills === a.projectSkills); return o ? nameOf(o) : ""; };
-      row.append(mark(s.icon, GLYPH.skill), w, agentChips(all, on, projectChange("projects/skill", p.dir, s.name, (next) => next.length
-        ? t("{skill} is in {name} for {agents}", { skill: s.name, name: p.name, agents: next.map(nameOf).join(", ") })
-        : t("{skill} is out of {name}", { skill: s.name, name: p.name })), { via }));
+      row.append(mark(s.icon, GLYPH.skill), w, scopedChips(p, s, all, "skill", { via, cantOff: routedOff }));
       card.append(row);
     }
     const dirs = [...new Set(all.map((a) => a.projectSkills))];
-    card.append(el("p", "lib-aside lib-projfoot", t("Placed in {dirs} of the project and listed in its .gitignore. A folder there that isn't magpie's is left as it is.", { dirs: dirs.join(", ") })));
+    card.append(el("p", "lib-aside lib-projfoot", t("Placed in {dirs} of the project and kept out of git, its .gitignore untouched. A folder there that isn't magpie's is left as it is.", { dirs: dirs.join(", ") })));
     const skip = shownAgents().filter((a) => a.skills && !a.projectSkills);
     if (skip.length) card.append(el("p", "lib-aside lib-projfoot", t("{agents} reads no project skills folder magpie knows of.", { agents: skip.map((a) => a.name).join(", ") })));
     return card;
+  }
+
+  // The open card's menu of the library's skills, those in the project
+  // ticked. One ticked goes to the agents the project's skills are for
+  // already, or, in a project with none yet, to every agent here that
+  // reads a project's skills; its chips change that after. One unticked is
+  // taken out of the project. The rest keep their agents.
+  function projectSkillsPick(p, all, has) {
+    const b = menuButton(t("Skills"), "lib-projpick", () => {
+      // a skill from the Library is ticked while on in the project for
+      // an agent that can have it turned off here; unticking turns it off
+      const offIds = all.filter((a) => a.projectSkillOff).map((a) => a.id);
+      const global = (s) => (s.agents || []).filter((id) => offIds.includes(id) && !routedOff(agentOf(id) || { name: id }, s));
+      const inherited = (s) => !p.skills[s.name]?.length && global(s).some((id) => !(p.skillsOff?.[s.name] || []).includes(id));
+      const now = lib.skills.filter((s) => p.skills[s.name]?.length || p.problems?.[s.name] || inherited(s)).map((s) => s.name);
+      // by source, as the Library lists them, a heading ticking its group
+      const gs = skillGroups(true);
+      const opts = gs.length < 2 ? lib.skills.map((s) => ({ v: s.name, name: s.name, literalName: true, note: "" }))
+        : gs.flatMap((g) => {
+          const title = g.mine || g.repo || t("On this computer");
+          return [{ v: "\x00" + g.key, group: g.skills.map((s) => s.name), name: title, literalName: true, note: "" },
+            ...g.skills.map((s) => ({ v: s.name, name: s.name, literalName: true, note: "", find: title }))];
+        });
+      openProtoMenu(b, opts, now, async (next) => {
+        const byName = (n) => lib.skills.find((s) => s.name === n);
+        let adds = next.filter((n) => !now.includes(n)), outs = now.filter((n) => !next.includes(n));
+        // from the Library: on and off in the project, not the project's own
+        const back = adds.filter((n) => p.skillsOff?.[n]?.length);
+        const offs = outs.filter((n) => inherited(byName(n)));
+        adds = adds.filter((n) => !back.includes(n));
+        outs = outs.filter((n) => !offs.includes(n));
+        if (back.length) {
+          await change("projects/skill-off", { dir: p.dir, names: back, agents: [] }, t("{item} is back on in {name}", { item: back.join(", "), name: p.name }));
+        }
+        if (offs.length) {
+          const shown = projectShown.get(p.dir);
+          for (const n of offs) shown?.add(n);
+          const ids = [...new Set(offs.flatMap((n) => global(byName(n))))];
+          await change("projects/skill-off", { dir: p.dir, names: offs, agents: ids }, t("{item} is off in {name} for {agents}", { item: offs.join(", "), name: p.name, agents: ids.map(nameOf).join(", ") }));
+        }
+        const ids = new Set(all.map((a) => a.id));
+        const used = [...new Set(Object.values(p.skills || {}).flat())].filter((id) => ids.has(id));
+        const agents = used.length ? used : all.filter((a) => !a.gone && !a.unseen && !a.asleep).map((a) => a.id);
+        const names = (xs) => xs.join(", ");
+        if (adds.length && agents.length) {
+          await change("projects/skills", { dir: p.dir, names: adds, agents }, adds.length === 1
+            ? t("{skill} is in {name} for {agents}", { skill: adds[0], name: p.name, agents: agents.map(nameOf).join(", ") })
+            : t("{skills} are in {name} for {agents}", { skills: names(adds), name: p.name, agents: agents.map(nameOf).join(", ") }));
+        }
+        if (outs.length) {
+          const shown = projectShown.get(p.dir);
+          for (const n of outs) shown?.delete(n);
+          await change("projects/skills", { dir: p.dir, names: outs, agents: [] }, outs.length === 1
+            ? t("{skill} is out of {name}", { skill: outs[0], name: p.name })
+            : t("{skills} are out of {name}", { skills: names(outs), name: p.name }));
+        }
+      }, "Pick the skills it gets", "", "right", false, lib.skills.length > 8 ? "Find a skill" : "");
+    });
+    b.setAttribute("aria-expanded", "false");
+    if (!lib.skills.length || !all.length) b.disabled = true;
+    return b;
   }
 
   // A project row's chip: lit at once, so a second click before magpie has
   // answered the first counts from it; the clicks are sent one at a time,
   // the last of them winning, and the page drawn again once they're in.
   const projectWriting = new Map();
-  function projectChange(path, dir, name, done) {
+  function projectChange(path, dir, name, done, offs = false) {
     return async (next, c) => {
-      const on = next.includes(c.dataset.agent);
+      const on = offs ? !next.includes(c.dataset.agent) : next.includes(c.dataset.agent);
       c.classList.toggle("on", on);
       if (on) c.classList.remove("via");
       c.setAttribute("aria-pressed", on ? "true" : "false");
@@ -4964,6 +6990,42 @@ magpie.plugin("library", (ctx) => {
     };
   }
 
+  // A project is the Library's global set with its own added and some of
+  // the global ones turned off there. A row's chip is lit for an agent
+  // that has the item in the project: given it in the Library (and not
+  // turned off here), or by the project. A click on an agent that has it
+  // from the Library turns it off, or back on, in this project alone; an
+  // agent that can't have one turned off for a project keeps it lit, and
+  // says so.
+  function scopedChips(p, item, all, kind, opts = {}) {
+    const skill = kind === "skill";
+    const global = (id) => (item.agents || []).includes(id) && !item.hidden;
+    const canOff = (a) => (skill ? a.projectSkillOff : a.projectOff) && !opts.cantOff?.(a, item);
+    const offs = ((skill ? p.skillsOff : p.serversOff) || {})[item.name] || [];
+    const own = ((skill ? p.skills : p.servers) || {})[item.name] || [];
+    const on = all.filter((a) => (global(a.id) ? !offs.includes(a.id) : own.includes(a.id))).map((a) => a.id);
+    const path = skill ? "projects/skill" : "projects/server";
+    const say = (next) => next.length
+      ? t(skill ? "{skill} is in {name} for {agents}" : "{server} is in {name} for {agents}", { skill: item.name, server: item.name, name: p.name, agents: next.map(nameOf).join(", ") })
+      : t(skill ? "{skill} is out of {name}" : "{server} is out of {name}", { skill: item.name, server: item.name, name: p.name });
+    const add = projectChange(path, p.dir, item.name, say);
+    const off = projectChange(path + "-off", p.dir, item.name, (next) => next.length
+      ? t("{item} is off in {name} for {agents}", { item: item.name, name: p.name, agents: next.map(nameOf).join(", ") })
+      : t("{item} is back on in {name}", { item: item.name, name: p.name }), true);
+    const change = (next, c) => {
+      if (!global(c.dataset.agent)) return add(next.filter((id) => !global(id)), c);
+      return off(all.filter((a) => global(a.id) && canOff(a) && !next.includes(a.id)).map((a) => a.id), c);
+    };
+    const always = (a) => global(a.id) && !canOff(a) ? opts.cantOff?.(a, item) || t("{agent} has it from the Library, and can't have it turned off in one project", { agent: a.name }) : "";
+    return agentChips(all, on, change, { ...opts, always });
+  }
+
+  // A skill the skill router lists is reached through the router's own
+  // skill, which a project can't turn one off in.
+  const routedOff = (a, s) => lib.skillRouter && s.router !== "direct" && !s.manual
+    ? t("{agent} reaches {skill} through the skill router, which can't leave it out in one project: set it to not go through the router first", { agent: a.name, skill: s.name })
+    : "";
+
   // The project's card, open on the MCP tab: each library server with the
   // chips of the agents that read a project's own servers.
   function projectServers(p, card) {
@@ -4978,16 +7040,87 @@ magpie.plugin("library", (ctx) => {
       const sub = el("div", "sub mono", problem || serverLine(s));
       sub.title = problem || serverLine(s);
       w.append(sub);
-      row.append(mark(s.icon, s.transport === "stdio" ? GLYPH.cmd : GLYPH.web), w, agentChips(all, p.servers?.[s.name] || [], projectChange("projects/server", p.dir, s.name, (next) => next.length
-        ? t("{server} is in {name} for {agents}", { server: s.name, name: p.name, agents: next.map(nameOf).join(", ") })
-        : t("{server} is out of {name}", { server: s.name, name: p.name })), { blocked: sseBlocked(s) }));
+      row.append(mark(s.icon, s.transport === "stdio" ? GLYPH.cmd : GLYPH.web), w, scopedChips(p, s, all, "server", { blocked: sseBlocked(s) }));
       card.append(row);
     }
     if (!lib.servers.length) card.append(el("p", "lib-aside lib-projfoot", t("No servers in the library yet")));
-    card.append(el("p", "lib-aside lib-projfoot", t("Written into {files} of the project, beside what's in them; a file magpie makes is listed in its .gitignore. A server there by the same name that isn't magpie's is left as it is.", { files: projectFiles() })));
+    card.append(el("p", "lib-aside lib-projfoot", t("Written into {files} of the project, beside what's in them; a file magpie makes is kept out of git, its .gitignore untouched. A server there by the same name that isn't magpie's is left as it is.", { files: projectFiles() })));
     card.append(el("p", "lib-aside lib-projfoot", t("Claude Code asks before it starts a project's servers; Codex reads .codex/config.toml, and Pi .pi/mcp.json, only in a project you trust.")));
     const skip = shownAgents().filter((a) => a.mcp && !a.projectMCP);
     if (skip.length) card.append(el("p", "lib-aside lib-projfoot", t("{agents} reads no project MCP file magpie knows of.", { agents: skip.map((a) => a.name).join(", ") })));
+    return card;
+  }
+
+  // The project's card, open on the Subagents tab: each library subagent
+  // with the chips of the agents that read a project's own subagent folder.
+  function projectSubagents(p, card) {
+    const all = shownAgents().filter((a) => a.projectSubagents);
+    for (const s of lib.subagents || []) {
+      const row = el("div", "row lib-row lib-projskill lib-projsubagent");
+      const w = el("div", "who");
+      const n = el("div", "name mono", s.name);
+      const problem = p.problems?.["subagent:" + s.name];
+      if (problem) n.append(tag(t("Not written"), "warn", problem));
+      w.append(n);
+      const sub = el("div", "sub", problem || s.description || "");
+      sub.title = problem || s.description || "";
+      w.append(sub);
+      const on = (p.subagents?.[s.name] || []).filter((id) => all.some((a) => a.id === id));
+      const say = (next) => next.length
+        ? t("{item} is in {name} for {agents}", { item: s.name, name: p.name, agents: next.map(nameOf).join(", ") })
+        : t("{item} is out of {name}", { item: s.name, name: p.name });
+      row.append(glyph(GLYPH.subagent), w, agentChips(all, on, projectChange("projects/subagents", p.dir, s.name, say)));
+      card.append(row);
+    }
+    if (!(lib.subagents || []).length) card.append(el("p", "lib-aside lib-projfoot", t("No subagents in the library yet")));
+    card.append(el("p", "lib-aside lib-projfoot", t("Written into the project's own agents folder, one file per subagent; a file magpie makes is kept out of git, its .gitignore untouched. A file there by the same name that isn't magpie's is left as it is.")));
+    return card;
+  }
+
+  // The agents a project's first instructions are for: those here that
+  // read a project's instructions file and have the shared ones on, else
+  // every one of them here.
+  function projectInstrDefaults() {
+    const all = shownAgents().filter((a) => a.projectInstructions && !a.gone && !a.unseen && !a.asleep);
+    const on = all.filter((a) => (lib.instructions?.agents || []).some((x) => x.agent === a.id && x.on));
+    return (on.length ? on : all).map((a) => a.id);
+  }
+
+  // The project's card, open on the Instructions tab: its own text, saved
+  // with the page's Save, and the chips of the agents whose project file
+  // it is written into.
+  function projectInstructions(p, card) {
+    const det = el("div", "lib-detail lib-projinstr");
+    det.dataset.detail = "proj:" + p.dir;
+    const problem = p.problems?.instructions;
+    if (problem) det.append(el("div", "lib-err", problem));
+    const ta = el("textarea", "lib-text small");
+    ta.dataset.lib = "projinstr:" + p.dir;
+    ta.spellcheck = false;
+    ta.value = projTexts[p.dir] ?? p.instr ?? "";
+    ta.placeholder = t("What only this project needs — its stack, how to run its tests, what not to touch…");
+    ta.oninput = () => { projTexts[p.dir] = ta.value; renderSaveBars(); };
+    ta.onkeydown = (e) => { e.stopPropagation(); if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); saveInstructions(); } };
+    autosize(ta, 110);
+    det.append(ta);
+    const all = shownAgents().filter((a) => a.projectInstructions);
+    const on = (p.instrAgents || []).filter((id) => all.some((a) => a.id === id));
+    // an agent reading the same file as one that has them has them too
+    const via = (a) => { const o = on.find((id) => agentOf(id)?.projectInstructions === a.projectInstructions); return o ? nameOf(o) : ""; };
+    const say = (next) => next.length
+      ? t("{name}'s instructions are in its files for {agents}", { name: p.name, agents: next.map(nameOf).join(", ") })
+      : t("{name}'s instructions are taken out of its files", { name: p.name });
+    const row = el("div", "row lib-row lib-projskill lib-projinstr-agents");
+    const w = el("div", "who");
+    const files = p.instrFiles?.length ? p.instrFiles : [...new Set(all.filter((a) => on.includes(a.id)).map((a) => a.projectInstructions))];
+    w.append(el("div", "sub", files.join(", ")));
+    row.append(w, agentChips(all, on, projectChange("projects/instructions", p.dir, "", say), { via }));
+    det.append(row);
+    det.onclick = (e) => e.stopPropagation();
+    card.append(det);
+    card.append(el("p", "lib-aside lib-projfoot", t("Written between two marker lines in the file each agent reads in the project — the rest of the file stays yours. A file magpie makes is kept out of git, its .gitignore untouched.")));
+    const skip = shownAgents().filter((a) => a.instructions && !a.projectInstructions);
+    if (skip.length) card.append(el("p", "lib-aside lib-projfoot", t("{agents} reads no project instructions file magpie knows of.", { agents: skip.map((a) => a.name).join(", ") })));
     return card;
   }
 
@@ -5000,13 +7133,13 @@ magpie.plugin("library", (ctx) => {
     ed.append(say);
     // #514: skills or servers given to a project once are often to stay
     // there; magpie can forget the project and leave them as they are
-    const has = p.placed?.length || Object.values(p.wrote || {}).some((x) => x.length);
+    const has = p.placed?.length || p.instrFiles?.length || Object.values(p.wrote || {}).some((x) => x.length);
     const keep = el("input");
     keep.type = "checkbox";
     const tell = () => {
       say.textContent = keep.checked
-        ? t("magpie forgets the project. The skills and MCP servers it put in the folder stay there as they are, with their lines in its .gitignore, and are yours from then on; a linked skill still follows the library's.")
-        : t("The skills and MCP servers magpie put in it are taken away, with their lines in its .gitignore. Nothing else in the folder is touched.");
+        ? t("magpie forgets the project. The skills and MCP servers it put in the folder stay there as they are, kept out of git, and are yours from then on; a linked skill still follows the library's.")
+        : t("The skills and MCP servers magpie put in it are taken away. Nothing else in the folder is touched.");
     };
     keep.onchange = tell;
     if (has) {
@@ -5110,10 +7243,29 @@ magpie.plugin("library", (ctx) => {
     bar.append(el("span", "label", t("Put skills in")), segs([["agents", t("Each agent's own folder")], ["shared", "~/.agents/skills"]], where, (w) => {
       if (w !== where) change("skills/where", { how: w }, w === "shared" ? t("Every skill is in ~/.agents/skills now") : t("Skills go to the agents they're ticked for now"));
     }));
-    bar.append(el("span", "note", where === "shared"
+    bar.append(el("span", "note", where === "shared" && lib.skillRouter
+      ? t("The skill router lists nothing while every skill is in ~/.agents/skills: choose each agent's own folder.")
+      : where === "shared"
       ? t("Every skill on here is linked into ~/.agents/skills too: each agent that reads that folder has every skill, whatever is ticked. The files stay in the library.")
       : t("Each agent gets the skills ticked for it, in its own folder.")));
     return bar;
+  }
+
+  // Updates by themselves (0xYaCo on X): with the switch on, magpie checks
+  // the skills from GitHub and git repositories as this page does and
+  // fetches again each one changed there; one changed here keeps its
+  // Update button (skill_autoupdate.go). Only with such a skill to update.
+  function skillAutoPart() {
+    if (!lib.autoUpdateSkills && !lib.skills.some((s) => s.kind === "github" || s.kind === "git")) return [];
+    const list = el("div", "list lib-list lib-hublist lib-skillauto");
+    const row = el("div", "row lib-row lib-hub");
+    const who = el("div", "who");
+    who.append(el("div", "name", t("Update by themselves")));
+    who.append(el("div", "sub wraps", t("Fetch skills from GitHub and git again when they change there. One you changed here stays as it is.")));
+    row.append(glyph(GLYPH.down), who, toggle(!!lib.autoUpdateSkills, t("Update by themselves"), (on) =>
+      change("skills/auto-update", { on }, on ? t("Skills update by themselves now") : t("Skills wait for you to update them now"))));
+    list.append(row);
+    return [list];
   }
 
   // The skill router: each agent is given one skill, magpie-skills, whose
@@ -5142,6 +7294,7 @@ magpie.plugin("library", (ctx) => {
       ["shared", "{agents} reads ~/.agents/skills, which other agents read too, so it keeps each skill of its own."],
       ["taken", "A skill in the library is called magpie-skills, so {agents} keeps each skill of its own: give that skill another name for the router to be used."],
       ["own", "{agents} has a skill called magpie-skills of its own, which magpie leaves as it is, so it keeps each skill of its own."],
+      ["none", "No skill of the library's is listed for {agents}: tick one for it, or list one kept out of the router."],
     ];
     for (const [k, text] of why) {
       const n = names(k);
@@ -5150,6 +7303,15 @@ magpie.plugin("library", (ctx) => {
         p.dataset.why = k;
         out.push(p);
       }
+    }
+    // skills in an agent's own folder that the library doesn't have are not
+    // listed, so each stays in its prompt
+    const mine = skillAgents().filter((a) => !a.gone && (a.skillRouter === "on" || a.skillRouter === "none")
+      && lib.foundSkills.some((f) => !f.manual && f.agents.includes(a.id))).map((a) => a.name).join(", ");
+    if (mine) {
+      const p = el("p", "lib-aside lib-hub-why", t("{agents} has skills of its own that aren't in the library, so the router doesn't list them: bring them in below.", { agents: mine }));
+      p.dataset.why = "found";
+      out.push(p);
     }
     return out;
   }
@@ -5535,6 +7697,53 @@ magpie.plugin("library", (ctx) => {
     };
   }
 
+  // A skill of the user's own: a name and a description make its SKILL.md
+  // in the library's folder (josephBenchap on X); it opens in the reader,
+  // whose path opens it in their editor.
+  function newSkill() {
+    const all = skillAgents();
+    const d = { name: "", description: "", agents: all.map((a) => a.id) };
+    const ed = el("div", "editor lib-editor lib-newskill");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.skill), el("b", "", t("New skill")));
+    ed.append(head);
+    const err = el("div", "editor-error");
+    const name = field2("", t("e.g. my-skill"), (v) => { d.name = v.trim(); });
+    name.classList.add("mono");
+    ed.append(...field(t("Name"), name, t("Letters, digits, - and _ — what the agents call it")));
+    const desc = el("textarea", "lib-text small lib-newskilldesc");
+    desc.placeholder = t("e.g. Writes release notes. Use when asked for a changelog.");
+    desc.spellcheck = false;
+    desc.rows = 2;
+    desc.maxLength = 1024;
+    desc.oninput = () => { d.description = desc.value; };
+    desc.onkeydown = (e) => { e.stopPropagation(); if (e.isComposing || e.keyCode === 229) return; if (e.key === "Escape") closeLibModal(); else if (e.key === "Enter") { e.preventDefault(); modal?.save?.(); } };
+    ed.append(...field(t("Description"), desc, t("What it does and when to use it: the agent reads this to decide when to load it")));
+    const agentsBox = el("div");
+    ed.append(...field(t("Agents"), agentsBox));
+    ed.append(err);
+    const drawAgents = () => agentsBox.replaceChildren(agentChips(all, d.agents, (next) => { d.agents = next; drawAgents(); }, { names: true, all: true }));
+    drawAgents();
+    const bar = el("div", "bar");
+    bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal));
+    const save = async () => {
+      err.textContent = "";
+      try {
+        take(await api("library/skills/create", { name: d.name, description: d.description, agents: d.agents }));
+        report(lib.result, t("{name} is in the library now", { name: d.name }));
+        render();
+        const made = lib.skills.find((x) => x.name === d.name);
+        if (made) viewSkill(made); else closeLibModal(true);
+      } catch (e) { err.textContent = e.message; }
+    };
+    bar.append(button(t("Create"), "primary", save));
+    ed.append(bar);
+    const original = JSON.stringify(d);
+    modal = { save, dirty: () => JSON.stringify(d) !== original };
+    openLib(ed);
+    requestAnimationFrame(() => name.focus());
+  }
+
   function installCard() {
     const card = el("div", "list lib-card lib-install");
     const line = el("div", "lib-find");
@@ -5550,7 +7759,9 @@ magpie.plugin("library", (ctx) => {
     if (probing) go.classList.add("busy");
     inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") find(); else if (e.key === "Escape" && probe) { probe = null; render(); } };
     const g = glyph(GLYPH.search, "lib-mini");
-    line.append(g, inp, go);
+    const mk = button(t("New skill"), "", () => newSkill());
+    mk.dataset.lib = "new-skill";
+    line.append(g, inp, go, mk);
     card.append(line);
     async function find() {
       const src = inp.value.trim();
@@ -5669,7 +7880,14 @@ magpie.plugin("library", (ctx) => {
       }
       nm.append(b);
     } else if (c?.status === "unknown") {
-      nm.append(tag(t("Not checked"), "lib-unchecked", checkError(c)));
+      const b = tag(t("Not checked"), "lib-unchecked", checkError(c));
+      // GitHub's limit without a token: the tag leads to where one is
+      // added, Settings › Network and sharing's GitHub row
+      if (c.limited && !c.limited.token) {
+        b.classList.add("link");
+        b.onclick = (e) => { e.stopPropagation(); openSettingsAt(e, "network", "#githubList .row"); };
+      }
+      nm.append(b);
     }
     // changed here since it was fetched from GitHub (#1449): an update asks
     // before it replaces that
@@ -5689,6 +7907,8 @@ magpie.plugin("library", (ctx) => {
       };
       nm.append(b);
     }
+    // synced in by its source and not fetched here yet (#5715)
+    if (s.pending) nm.append(tag(t("Not fetched yet"), "warn lib-pending", t("Not fetched on this computer yet: Update tries again")));
     if (s.manual) nm.append(manualTag(s.name));
     if (lib.skillRouter && s.router === "direct" && !s.manual) nm.append(tag(t("Not through the router"), "lib-direct", t("Each agent is given it as its own skill, as with the skill router off.")));
     // turned off on this computer alone: no agent here gets it, the ticks
@@ -5743,9 +7963,14 @@ magpie.plugin("library", (ctx) => {
     if (!gone && (s.kind === "github" || s.kind === "git" || s.origin)) {
       const u = button("", "lib-icon", async (e, b) => {
         if (s.edited) return confirmUpdateEdited(s);
+        // spinning, with the row's actions kept in view while the fetch
+        // runs; then what came of it: updated, nothing new, or the error
         b.classList.add("busy");
-        await change("skills/update", { name: s.name }, t("{name} is up to date", { name: s.name }));
+        b.parentElement?.classList.add("busy");
+        await change("skills/update", { name: s.name }, (res) => res?.current?.includes(s.name)
+          ? t("{name} is already up to date", { name: s.name }) : t("{name} is updated", { name: s.name }));
         b.classList.remove("busy");
+        b.parentElement?.classList.remove("busy");
       });
       u.append(svg(GLYPH.up, 13, 1.5));
       const gitRepo = gitRepoOf(s);
@@ -5774,9 +7999,12 @@ magpie.plugin("library", (ctx) => {
     here.title = s.offHere ? t("Turn on on this computer") : t("Turn off on this computer only: your other computers keep it");
     here.setAttribute("aria-pressed", s.offHere ? "true" : "false");
     acts.append(here);
-    const rm = button("", "lib-icon danger", () => confirmRemoveSkill(s));
-    rm.append(svg(GLYPH.trash, 13, 1.4));
-    rm.title = t("Remove");
+    // brought in from the agents (BeiWeiji on X): Remove gives it back to
+    // them as they had it, and says so
+    const back = s.back?.length ? s.back.map(nameOf).join(", ") : "";
+    const rm = button("", "lib-icon" + (back ? " lib-putback" : " danger"), () => confirmRemoveSkill(s));
+    rm.append(svg(back ? GLYPH.putBack : GLYPH.trash, 13, 1.4));
+    rm.title = back ? t("Put back in {agents}", { agents: back }) : t("Remove");
     acts.append(rm);
     row.append(mark(s.icon, GLYPH.skill), who, acts, agentChips(withGone(all, s.agents), s.agents, chipsChange("skills/agents", s.name, "skills", (x) => skillRow(x, all)), { problems: s.problems, via: viaFor(s), all: true, always: alwaysFor(s) }));
     if (picking) return pickRow(row, s.name);
@@ -5903,6 +8131,7 @@ magpie.plugin("library", (ctx) => {
     if (readers) ed.append(el("p", "lib-confirm", one
       ? t("{agents} read ~/.agents/skills themselves. They keep it, ticked here, and you can turn it off for any of them, or on this computer only.", { agents: readers })
       : t("{agents} read ~/.agents/skills themselves. They keep them, ticked here, and you can turn each off for any of them, or on this computer only.", { agents: readers })));
+    if (lib.sharedSkills) ed.append(el("p", "lib-confirm", t("Every skill is kept in ~/.agents/skills now, which can't go with choosing agents. That setting goes off: magpie's links there are taken away, your own entries stay.")));
     ed.append(el("p", "lib-confirm lib-muted", one
       ? t("To put it back: {cmd}", { cmd: "magpie library skill hand-back " + s.name })
       : t("To put one back: {cmd}", { cmd: "magpie library skill hand-back <name>" })));
@@ -5950,6 +8179,7 @@ magpie.plugin("library", (ctx) => {
   }
 
   function confirmRemoveSkill(s) {
+    if (s.back?.length) return confirmPutBack(s);
     const ed = el("div", "editor lib-editor");
     const head = el("div", "ehead");
     head.append(glyph(GLYPH.trash), el("b", "", t("Remove {name}?", { name: s.name })));
@@ -5959,6 +8189,22 @@ magpie.plugin("library", (ctx) => {
       : t("It is taken out of every agent it was given to, and its folder is moved to magpie's backups.")));
     const bar = el("div", "bar");
     const go = button(t("Remove"), "primary danger-fill", async () => { if (await change("skills/remove", { name: s.name }, t("{name} removed", { name: s.name }))) closeLibModal(true); });
+    bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
+    ed.append(bar);
+    modal = { save: () => go.click() };
+    openLib(ed);
+  }
+
+  // one brought in from the agents leaves the library for them again
+  function confirmPutBack(s) {
+    const agents = s.back.map(nameOf).join(", ");
+    const ed = el("div", "editor lib-editor lib-putback-sheet");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.putBack), el("b", "", t("Put {name} back?", { name: s.name })));
+    ed.append(head);
+    ed.append(el("p", "lib-confirm", t("It leaves the library and goes back to {agents} as it was before you brought it in.", { agents })));
+    const bar = el("div", "bar");
+    const go = button(t("Put it back"), "primary", async () => { if (await change("skills/remove", { name: s.name }, t("{name} went back to {agents}", { name: s.name, agents }))) closeLibModal(true); });
     bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
     ed.append(bar);
     modal = { save: () => go.click() };
@@ -6299,9 +8545,28 @@ magpie.plugin("library", (ctx) => {
   const market = {
     mcp: { q: "", items: null, error: "", loading: false, seq: 0, timer: 0, custom: null, shown: 0 },
     skills: { q: "", items: null, error: "", loading: false, seq: 0, timer: 0, shown: 0 },
+    pi: { q: "", items: null, error: "", loading: false, seq: 0, timer: 0, shown: 0 },
   };
   // how many cards a list shows at first, and each Show more adds
   const MARKET_PAGE = 60;
+  // Who uses each server, by its market id: the computers whose library
+  // had it in the last week (usemagpie.ai, through /api/plugins/counts),
+  // asked at most hourly. A server with USED of them goes first, most used
+  // first; the rest keep the market's own order, featured first.
+  const USED = 20;
+  let serverUsers = {}, usersAsked = 0, usersAsk = null;
+  function askServerUsers() {
+    if (!usersAsk || Date.now() - usersAsked > 36e5) {
+      usersAsked = Date.now();
+      usersAsk = api("plugins/counts").then((r) => { serverUsers = r.servers || {}; }, () => { usersAsked = Date.now() - 36e5 + 6e4; }); // a failed ask is tried again in a minute, not with every search
+    }
+    return usersAsk;
+  }
+  const usersOf = (x) => serverUsers[x.id]?.users || 0;
+  function byUse(items) {
+    const used = items.filter((x) => usersOf(x) >= USED).sort((a, b) => usersOf(b) - usersOf(a));
+    return used.length ? [...used, ...items.filter((x) => usersOf(x) < USED)] : items;
+  }
   const asked = new Set(); // skills whose description has been asked for
 
   async function fetchMarket(kind) {
@@ -6309,10 +8574,17 @@ magpie.plugin("library", (ctx) => {
     const seq = ++m.seq;
     m.loading = true;
     drawMarket(kind);
+    // the counts are asked beside the list, and waited for only briefly:
+    // a list already drawn is never reordered under the reader
+    const users = kind === "mcp" ? askServerUsers() : null;
     try {
-      const r = await api("library/market/" + (kind === "mcp" ? "servers" : "skills") + "?q=" + encodeURIComponent(m.q.trim()));
+      const r = await api("library/market/" + ({ mcp: "servers", skills: "skills", pi: "pi" })[kind] + "?q=" + encodeURIComponent(m.q.trim()));
+      if (users) await Promise.race([users, new Promise((ok) => setTimeout(ok, 1000))]);
       if (seq !== m.seq) return;
       m.items = r.items || [];
+      // a search keeps the registry's ranking
+      m.byUse = kind === "mcp" && !m.q.trim() && m.items.some((x) => usersOf(x) >= USED);
+      if (m.byUse) m.items = byUse(m.items);
       m.shown = MARKET_PAGE;
       m.error = r.error || "";
       // the source that didn't answer when the rest did (#1589)
@@ -6330,6 +8602,7 @@ magpie.plugin("library", (ctx) => {
     m.loading = false;
     drawMarket(kind);
     if (kind === "skills") describeSkills();
+    if (kind === "pi") return;
     // The market reads the library as it is now; one it calls added that
     // this page doesn't list was added elsewhere — another window, the CLI.
     const mine = new Set((kind === "mcp" ? lib?.servers : lib?.skills)?.map((x) => x.name) || []);
@@ -6365,7 +8638,7 @@ magpie.plugin("library", (ctx) => {
     const inp = el("input");
     inp.type = "search";
     inp.dataset.lib = "market-" + kind;
-    inp.placeholder = kind === "mcp" ? t("Search MCP servers — GitHub, Postgres, Figma…") : t("Search skills on skills.sh — react, pdf, testing…");
+    inp.placeholder = kind === "mcp" ? t("Search MCP servers — GitHub, Postgres, Figma…") : kind === "pi" ? t("Search Pi packages on npm — mcp, web, subagents…") : t("Search skills on skills.sh — react, pdf, testing…");
     inp.spellcheck = false;
     inp.autocomplete = "off";
     inp.value = m.q;
@@ -6373,7 +8646,7 @@ magpie.plugin("library", (ctx) => {
       m.q = inp.value;
       clearTimeout(m.timer);
       const q = m.q.trim();
-      if (kind === "skills" && q.length === 1) return;
+      if (kind !== "mcp" && q.length === 1) return;
       m.timer = setTimeout(() => fetchMarket(kind), 320);
     };
     inp.onkeydown = (e) => {
@@ -6396,7 +8669,7 @@ magpie.plugin("library", (ctx) => {
     box.classList.toggle("loading", m.loading);
     const note = box.querySelector(".mk-note");
     note.textContent = q && m.items ? (m.items.length === 1 ? t("1 result") : t("{n} results", { n: m.items.length }))
-      : kind === "mcp" ? t("Featured, and the official MCP Registry") : t("Popular on skills.sh");
+      : kind === "mcp" ? (m.byUse ? t("Most used first, then featured and the MCP Registry") : t("Featured, and the official MCP Registry")) : kind === "pi" ? t("Most downloaded on npm") : t("Popular on skills.sh");
     const grid = box.querySelector(".mk-grid");
     grid.replaceChildren();
     if (!m.items) {
@@ -6419,6 +8692,7 @@ magpie.plugin("library", (ctx) => {
     if (m.error && m.failed && m.items.length) {
       grid.append(el("div", "mk-msg mk-partial", kind === "mcp"
         ? t("The MCP Registry didn't answer ({error}), so these are only magpie's featured servers that match.", { error: m.failed.cause })
+        : kind === "pi" ? t("npm's search didn't answer ({error}), so these are only the matches among the most downloaded packages.", { error: m.failed.cause })
         : t("skills.sh's search didn't answer ({error}), so these are only the matches among magpie's picks and the most installed skills.", { error: m.failed.cause })));
     } else if (m.error) grid.append(el("div", "mk-msg err", m.error));
     if (kind === "mcp" && q && m.custom) grid.append(customAt(q, m.custom, m.items.length));
@@ -6426,9 +8700,11 @@ magpie.plugin("library", (ctx) => {
       grid.append(el("div", "mk-msg", q ? t("Nothing matches “{q}”.", { q }) : t("Nothing to show.")));
       return;
     }
-    for (const x of m.items.slice(0, m.shown)) grid.append(kind === "mcp" ? serverCard(x) : skillCard(x));
+    for (const x of m.items.slice(0, m.shown)) grid.append(cardOf(kind, x));
     moreCards(kind, grid);
   }
+
+  const cardOf = (kind, x) => kind === "mcp" ? serverCard(x) : kind === "pi" ? piCard(x) : skillCard(x);
 
   // The rest of a long list, a page at a time: the cards added under the
   // ones shown, which stay where they are.
@@ -6439,7 +8715,7 @@ magpie.plugin("library", (ctx) => {
     const more = button(t("Show more ({n} left)", { n: left.toLocaleString(intlLang()) }), "mk-more", () => {
       const from = m.shown;
       m.shown += MARKET_PAGE;
-      more.before(...m.items.slice(from, m.shown).map((x) => kind === "mcp" ? serverCard(x) : skillCard(x)));
+      more.before(...m.items.slice(from, m.shown).map((x) => cardOf(kind, x)));
       more.remove();
       moreCards(kind, grid);
       if (kind === "skills") describeSkills();
@@ -6533,6 +8809,13 @@ magpie.plugin("library", (ctx) => {
     const d = el("p", "mk-desc", about(x));
     d.title = about(x);
     const foot = el("div", "mk-foot");
+    const n = usersOf(x);
+    if (n) {
+      const u = el("span", "mk-installs");
+      u.append(svg(GLYPH.person, 11, 1.5), el("span", "", compact(n)));
+      u.title = t("{n} people use it, counted from the last week", { n: n.toLocaleString(intlLang()) });
+      foot.append(u);
+    }
     foot.append(el("span", "mk-id mono", x.name), el("span", "grow"), (needsKey(x) || x.optIn) && !x.have ? button(t("Add…"), "action mk-add", () => serverSheet(x)) : addButton(x, () => addServer(x, {}, null)));
     c.append(top, d, foot);
     c.onclick = () => serverSheet(x);
@@ -6547,6 +8830,10 @@ magpie.plugin("library", (ctx) => {
     if (ok) { x.have = x.name; drawMarket("mcp"); } // take asked the market again
     return ok;
   }
+
+  // the Library's web search servers: true for one Settings also offers as
+  // a search API (provider.SearchVendors)
+  const WEB_SEARCHES = { tavily: true, "brave-search": true, exa: true, firecrawl: true, anysearch: false };
 
   // A market server up close: what it is, what it needs, and who gets it.
   function serverSheet(x) {
@@ -6573,9 +8860,23 @@ magpie.plugin("library", (ctx) => {
       ed.append(browserSetup());
     } else if (x.name === "magpie-web-search") {
       ed.append(el("p", "mk-hint", t("Pick the agents that may search with it: each search goes where Settings → Models → Web search sends it, and costs what that charges.")));
+    } else if (x.name in WEB_SEARCHES) {
+      // a search server of its own (netube99 on X): the agents call it
+      // with its key, beside magpie's web search, which it neither uses nor
+      // switches on; one Settings has as a search API is offered there too
+      const v = WEB_SEARCHES[x.name];
+      const hint = el("p", "mk-hint", t("Agents call it themselves, beside magpie's web search, which doesn't use it.")
+        + (v ? " " + t("As a search API in Settings → Models → Web search, {name} searches for every model, with no server to add.", { name: x.title || x.name }) : ""));
+      const go = el("button", "link", t("Set up in Settings"));
+      go.type = "button";
+      go.onclick = async (e) => { if (await closeLibModal()) openSettingsAt(e, "models", "#searchList .row"); };
+      hint.append(" ", go);
+      ed.append(hint);
+    } else if (x.name === "magpie-sessions") {
+      ed.append(el("p", "mk-hint", t("Pick the agents that may search and read what was said in your other sessions.")));
     } else if (x.name === "magpie-vision") {
       ed.append(el("p", "mk-hint", t("Pick the agents that may read images with it: each image goes to the Image recognition model set in Settings → Models → Images, and costs what that model charges.")));
-    } else if (x.optIn) ed.append(el("p", "mk-hint", t("Pick the agents that may generate images: each image costs what the model set in Settings → Images charges.")));
+    } else if (x.optIn) ed.append(el("p", "mk-hint", t("Pick the agents that may generate images: each image costs what the model set in Settings → Models → Images charges.")));
     // one of magpie's own that can't answer yet says why, and is added all
     // the same: it answers once that is set up, its tools saying how
     if (x.unready) ed.append(el("p", "mk-hint mk-unready", t(x.unready)));
@@ -6766,6 +9067,102 @@ magpie.plugin("library", (ctx) => {
     return ok;
   }
 
+  // A package from Pi's market: who has it, or Install into a Pi (picked
+  // when there are several). Pi itself installs it.
+  const piLive = () => (piView?.pis || []).filter((p) => !p.asleep && !p.err && !isHidden({ id: p.id }));
+  const piHas = (x) => piLive().filter((p) => (p.packages || []).some((k) => k.kind === "npm" && k.name === x.name));
+  function piCard(x) {
+    const has = piHas(x);
+    const c = el("div", "mk-card" + (has.length ? " have" : ""));
+    c.dataset.id = x.source;
+    const top = el("div", "mk-top");
+    const who = el("div", "mk-who");
+    const nm = el("div", "mk-name");
+    nm.append(el("span", "mk-title", x.name));
+    who.append(nm);
+    const meta = el("div", "mk-meta");
+    if (x.publisher) meta.append(el("span", "mk-pub", x.publisher));
+    if (x.version) meta.append(el("span", "mk-badge", "v" + x.version));
+    who.append(meta);
+    top.append(logo(x.icon, x.name), who);
+    const d = el("p", "mk-desc", x.description || "");
+    d.title = x.description || "";
+    const foot = el("div", "mk-foot");
+    if (x.downloads) {
+      const n = el("span", "mk-installs");
+      n.append(svg(GLYPH.down, 11, 1.5), el("span", "", compact(x.downloads)));
+      n.title = t("{n} downloads last month", { n: x.downloads.toLocaleString(intlLang()) });
+      foot.append(n);
+    }
+    foot.append(extLink(x.repo || x.npm, x.repo ? t("Source") : "npm"), el("span", "grow"));
+    const live = piLive();
+    const want = live.filter((p) => !has.includes(p));
+    if (has.length && !want.length) {
+      const b = el("span", "mk-have");
+      b.append(svg(CHECK, 11, 2), el("span", "", t("Installed")));
+      b.title = t("In {agents}", { agents: has.map((p) => p.name).join(", ") });
+      foot.append(b);
+    } else if (want.length) {
+      const busy = want.some((p) => piBusy.has(p.id + " " + x.source));
+      const b = button(busy ? t("Installing…") : t("Install"), "action mk-add", () => {
+        if (want.length === 1) return installPi(want[0], x);
+        openProtoMenu(b, want.map((p) => ({ v: p.id, name: p.name, literalName: true, note: "" })), "", (id) => installPi(want.find((p) => p.id === id), x), "Install into", "", "right");
+      });
+      if (busy) { b.disabled = true; b.classList.add("busy"); }
+      if (has.length) b.title = t("In {agents}", { agents: has.map((p) => p.name).join(", ") });
+      foot.append(b);
+    }
+    c.append(top, d, foot);
+    return c;
+  }
+  async function installPi(p, x) {
+    if (!p) return;
+    const key = p.id + " " + x.source;
+    piBusy.add(key);
+    drawMarket("pi");
+    status(t("Installing {name} into {agent}…", { name: x.name, agent: p.name }), "", 300000);
+    try {
+      const v = await api("library/pi/install", { pi: p.id, source: x.source });
+      piView = v;
+      status(v.pending
+        ? t("{name} is in {agent}'s packages now: Pi installs it when it next starts", { name: x.name, agent: p.name })
+        : t("{name} is installed in {agent}: Pi loads it when it next starts, or at /reload", { name: x.name, agent: p.name }), "ok", 8000);
+    } catch (e) {
+      status(e.message, "err", 10000);
+    }
+    piBusy.delete(key);
+    if (tab === "pi") render();
+  }
+  function confirmRemovePi(p, k) {
+    const ed = el("div", "editor lib-editor lib-rmone");
+    const head = el("div", "ehead");
+    head.append(glyph(GLYPH.trash), el("b", "", t("Remove {name} from {agent}?", { name: k.name, agent: p.name })));
+    ed.append(head);
+    ed.append(el("p", "lib-confirm", p.wsl
+      ? t("It is taken out of {agent}'s settings.json; Pi stops loading it when it next starts.", { agent: p.name })
+      : t("pi remove takes it out of {agent}'s settings.json and uninstalls it.", { agent: p.name })));
+    const bar = el("div", "bar");
+    const go = button(t("Remove"), "primary danger-fill", async () => {
+      go.disabled = true;
+      const key = p.id + " " + k.source;
+      piBusy.add(key);
+      try {
+        piView = await api("library/pi/remove", { pi: p.id, source: k.source });
+        status(t("{name} removed from {agent}", { name: k.name, agent: p.name }), "ok", 6000);
+        closeLibModal(true);
+      } catch (e) {
+        status(e.message, "err", 10000);
+        go.disabled = false;
+      }
+      piBusy.delete(key);
+      if (tab === "pi") render();
+    });
+    bar.append(el("span", "grow"), button(t("Cancel"), "", closeLibModal), go);
+    ed.append(bar);
+    modal = { save: () => go.click() };
+    openLib(ed);
+  }
+
   function skillSheet(x) {
     const all = skillAgents();
     let agents = all.map((a) => a.id);
@@ -6823,7 +9220,9 @@ magpie.plugin("library", (ctx) => {
   // unsaved text, or a lookup under way.
   // What changed there changes what the market calls added, too: take asks it again.
   async function quietLoad() {
-    if (page.hidden || modal || dirty() || probing) return;
+    if (page.hidden || modal || dirty() || memDirty() || probing) return;
+    // what agents saved meanwhile
+    if (tab === "memory" && mem) loadMemory();
     await load(true);
   }
   const shelf = () => JSON.stringify([lib?.servers?.map((x) => x.name), lib?.skills?.map((x) => x.name)]);
@@ -6843,7 +9242,7 @@ magpie.plugin("library", (ctx) => {
         if (!confirmationPending && modal && e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); closeLibModal(); }
       }, true);
       // leaving the page with the shared text not saved asks first
-      window.addEventListener("beforeunload", (e) => { if (lib && dirty()) e.preventDefault(); });
+      window.addEventListener("beforeunload", (e) => { if (lib && (dirty() || memDirty())) e.preventDefault(); });
       page.addEventListener("scroll", () => page.querySelector(".lib-head")?.classList.toggle("stuck", page.scrollTop > 0), { passive: true });
       document.addEventListener("visibilitychange", () => { if (!document.hidden) quietLoad(); });
       window.addEventListener("focus", quietLoad);
@@ -6871,7 +9270,7 @@ magpie.plugin("library", (ctx) => {
     redraw: () => { if (lib) render(); },
     // the reader leaving the page: its dialog closed, and what isn't saved
     close: () => { if (modal) closeLibModal(true); else closeModal(); },
-    dirty: () => !!lib && dirty(),
+    dirty: () => !!lib && (dirty() || memDirty()),
     discard: () => discard(true),
   });
 });

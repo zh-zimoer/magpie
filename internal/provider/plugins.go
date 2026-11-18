@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/probelog"
 	"github.com/yetone/magpie/internal/settings"
@@ -54,6 +54,13 @@ const (
 // out of time. The plugin host takes it off whatever the plugin sends on
 // (host.js), as it does the two above.
 const FallbackHeader = "X-Magpie-Fallback"
+
+// WaitHeader tells a magpie's gateway how many seconds its client waits
+// for the answer: a model test asking a remote magpie sends its own wait,
+// and the gateway takes no retry pause or patience round that would end
+// past it, so the test is told the error rather than running out of time
+// (plugins#827). Like every X-Magpie- header it goes no further.
+const WaitHeader = "X-Magpie-Wait"
 
 // SessionToPluginHeader and SubagentToPluginHeader tell a plugin's fetch
 // the session the agent named (sessionOf: Claude Code's
@@ -136,6 +143,15 @@ func (p Provider) IsPlugin() bool { return p.Account != nil && p.Account.plugin 
 func PluginForTest(id, pluginID string) Provider {
 	pp := plugin.Provider{ID: pluginID}
 	return Provider{ID: id, Account: &Account{Agent: "plugin", User: id, plugin: &pp}}
+}
+
+// PluginAtForTest is PluginForTest for a plugin whose provider says its
+// requests go to api and whose models speak Code Assist.
+func PluginAtForTest(id, pluginID, api string) Provider {
+	p := PluginForTest(id, pluginID)
+	p.Account.plugin.API = api
+	p.Account.codeAssist = pluginBase + pluginID
+	return p
 }
 
 // PluginProvider is the id OpenCode knows the plugin's provider p is by
@@ -254,7 +270,26 @@ func pluginProtocol(provider string, m plugin.Model) Protocol {
 	return Chat
 }
 
-var gptN = regexp.MustCompile(`^gpt-(\d+)`)
+// pluginProtocols are the APIs model is served on: its own
+// (pluginProtocol) first, then each other one the plugin says its vendor
+// serves it on (m.Also: Open Design's amr-link serves every model on chat
+// completions, Responses and Anthropic's messages). A client's request on
+// one of them is relayed as it was sent; an OpenDesign's Anthropic request
+// to a model declared on chat completions was translated to it
+// (gaubeebangeel on X).
+func pluginProtocols(provider string, m plugin.Model) []Protocol {
+	out := []Protocol{pluginProtocol(provider, m)}
+	for _, npm := range m.Also {
+		other := m
+		other.NPM, other.Also = npm, nil
+		if proto := pluginProtocol(provider, other); !slices.Contains(out, proto) {
+			out = append(out, proto)
+		}
+	}
+	return out
+}
+
+var gptN = lazyre.New(`^gpt-(\d+)`)
 
 // copilotAPI is OpenCode's shouldUseCopilotResponsesApi: GPT-5 and after,
 // but for gpt-5-mini, on Responses.
@@ -333,7 +368,7 @@ func pluginCatalog(pp plugin.Provider) []catalog.Model {
 		}
 		c := catalog.Model{
 			ID: m.ID, Name: m.Name, Provider: pp.ID, Released: m.Released,
-			APIs: []string{string(pluginProtocol(pp.ID, m))}, Images: m.Image,
+			APIs: protocolNames(pluginProtocols(pp.ID, m)), Images: m.Image,
 			Context: catalog.Window(m.Input), Output: m.Output, Free: m.Free,
 			Rate: m.Rate, RateWas: m.RateWas,
 			// the model's own sampling, as its plugin said it (#2492)
@@ -582,15 +617,17 @@ func pluginProviderServing(pp plugin.Provider, l pluginLogin, keys []string) Pro
 		}
 	}
 	for _, m := range pp.Models {
-		switch pluginProtocol(pp.ID, m) {
-		case Chat:
-			p.Chat = pluginBase + pp.ID + "/v1"
-		case Responses:
-			p.Responses = pluginBase + pp.ID + "/v1"
-		case Anthropic:
-			p.Anthropic = pluginBase + pp.ID
-		case CodeAssist:
-			a.codeAssist = pluginBase + pp.ID
+		for _, proto := range pluginProtocols(pp.ID, m) {
+			switch proto {
+			case Chat:
+				p.Chat = pluginBase + pp.ID + "/v1"
+			case Responses:
+				p.Responses = pluginBase + pp.ID + "/v1"
+			case Anthropic:
+				p.Anthropic = pluginBase + pp.ID
+			case CodeAssist:
+				a.codeAssist = pluginBase + pp.ID
+			}
 		}
 	}
 	if pp.Decide {
@@ -607,16 +644,25 @@ func pluginProviderServing(pp plugin.Provider, l pluginLogin, keys []string) Pro
 	return p
 }
 
-// pluginAPIs is the one API a plugin provider's model is spoken to on.
+// pluginAPIs are the APIs a plugin provider's model is spoken to on, its
+// own first (pluginProtocols).
 func (p Provider) pluginAPIs(model string) []Protocol {
 	pp := p.Account.plugin
 	if cur, ok := PluginOf(p.ID); ok {
 		pp = &cur
 	}
 	if m, ok := pluginModel(*pp, model); ok {
-		return []Protocol{pluginProtocol(pp.ID, m)}
+		return pluginProtocols(pp.ID, m)
 	}
 	return nil
+}
+
+func protocolNames(ps []Protocol) []string {
+	out := make([]string, len(ps))
+	for i, p := range ps {
+		out[i] = string(p)
+	}
+	return out
 }
 
 // Origin is the scheme and host p's requests go to, for a URL of the
@@ -648,6 +694,19 @@ func (p Provider) Origin(ctx context.Context) string {
 		return ""
 	}
 	return scheme + "://" + HostOf(rest)
+}
+
+// EffortHeader is the header a plugin's fetch is told the request's
+// effort in: one of the efforts its model's variants named, or another the
+// client asked for (minimal, xhigh), for the plugin to pick its variant by.
+const EffortHeader = "X-Magpie-Effort"
+
+type effortKey struct{}
+
+// WithEffort is ctx carrying the effort a request asks of a plugin's
+// model, which pluginFetch tells the plugin in EffortHeader.
+func WithEffort(ctx context.Context, effort string) context.Context {
+	return context.WithValue(ctx, effortKey{}, effort)
 }
 
 // pluginFetch sends a request the gateway made for a plugin's provider
@@ -707,7 +766,7 @@ func pluginFetch(pp plugin.Provider, account string, req *http.Request) (*http.R
 	var url string
 	switch {
 	case codeAssist:
-		url = base + "/models/" + api + ":streamGenerateContent?alt=sse"
+		url = base + "/models/" + GeminiModelPath(api) + ":streamGenerateContent?alt=sse"
 	case strings.HasPrefix(rest, "/v1/"):
 		// chat, responses and Anthropic's messages: the AI SDK's base
 		// ends where magpie's /v1 does
@@ -728,6 +787,9 @@ func pluginFetch(pp plugin.Provider, account string, req *http.Request) (*http.R
 		if len(vs) > 0 && !strings.EqualFold(k, ConversationHeader) {
 			h[strings.ToLower(k)] = vs[0]
 		}
+	}
+	if e, _ := ctx.Value(effortKey{}).(string); e != "" {
+		h[strings.ToLower(EffortHeader)] = e
 	}
 	resp, err := plugin.Fetch(ctx, plugin.FetchRequest{
 		Provider: pp.ID, Account: account, Model: api, NPM: m.NPM, URL: url, Method: req.Method,
@@ -780,12 +842,12 @@ const SignInHeader = "X-Magpie-Sign-In"
 // provider supported" (#2887), and Azure OpenAI's DeploymentNotFound, whose
 // message "The API deployment for this resource does not exist" a relay
 // passes on as a 400 (its 404 fails over by its status already).
-var ModelUnserved = regexp.MustCompile(`(?i)model.{0,80}(not (supported|accessible|available|found|enabled|allowed)|unsupported|does ?n[o']t exist|unknown|invalid)|(no such|unknown|invalid|unsupported) model|model_not_found|has no provider supported|deployment[ _]?not[ _]?found|deployment.{0,60}does ?n[o']t exist|模型.{0,12}(不存在|不支持|无权|未开通)`)
+var ModelUnserved = lazyre.New(`(?i)model.{0,80}(not (supported|accessible|available|found|enabled|allowed)|unsupported|does ?n[o']t exist|unknown|invalid)|(no such|unknown|invalid|unsupported) model|model_not_found|has no provider supported|deployment[ _]?not[ _]?found|deployment.{0,60}does ?n[o']t exist|模型.{0,12}(不存在|不支持|无权|未开通)`)
 
 // signInWords are words of a refusal about the sign-in itself, which a
 // model named beside them doesn't make the model's: "model gpt-x: invalid
 // token" is the token.
-var signInWords = regexp.MustCompile(`(?i)token|api.?key|credential|sign.?in|log.?in|expired|session|令牌|密钥|登录|过期`)
+var signInWords = lazyre.New(`(?i)token|api.?key|credential|sign.?in|log.?in|expired|session|令牌|密钥|登录|过期`)
 
 // modelOnly401 says a 401 a plugin answered without SignInHeader is about
 // the model, not the account's sign-in: its body says the model isn't

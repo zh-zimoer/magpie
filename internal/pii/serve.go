@@ -13,13 +13,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/redact"
 )
@@ -175,7 +175,18 @@ type candidate struct {
 // A CPU without what pf-serve is built for runs pf-serve-base, on the
 // CPU alone: pf-serve-vulkan is built like pf-serve, and would end the
 // same way.
+//
+// On Windows on Arm pf-serve runs emulated (onArmWindows): on the CPU,
+// since the x64 pf-serve-vulkan has no x64 Vulkan driver to load there,
+// pf-serve and then pf-serve-base, for an emulation without AVX2.
 func candidates(cpu bool) []candidate {
+	if onArmWindows() {
+		out := []candidate{{exe("pf-serve"), true}}
+		if _, err := os.Stat(exe("pf-serve-base")); err == nil {
+			out = append(out, candidate{exe("pf-serve-base"), true})
+		}
+		return out
+	}
 	if !fullX86() {
 		if _, err := os.Stat(exe("pf-serve-base")); err == nil {
 			return []candidate{{exe("pf-serve-base"), true}}
@@ -373,14 +384,14 @@ func (h *helper) died() string {
 
 // startup are the lines ggml writes as it starts, every time, on a GPU
 // and on the CPU alike: what the device is, the kernels it built.
-var startup = regexp.MustCompile(`^(ggml_metal_(device_init|library_init|init|free|library_compile_pipeline)|ggml_vulkan|load_backend|register_backend|register_device):`)
+var startup = lazyre.New(`^(ggml_metal_(device_init|library_init|init|free|library_compile_pipeline)|ggml_vulkan|load_backend|register_backend|register_device):`)
 
 // trouble is a line that says something went wrong, startup's or not.
-var trouble = regexp.MustCompile(`(?i)error|fail|assert|abort|unable|cannot|can't|could not|out of memory|exception|lost`)
+var trouble = lazyre.New(`(?i)error|fail|assert|abort|unable|cannot|can't|could not|out of memory|exception|lost`)
 
 // deviceLost is a GPU the driver reset under pf-serve, as ggml's Vulkan
 // says it (vk::DeviceLostError, VK_ERROR_DEVICE_LOST) and Metal's.
-var deviceLost = regexp.MustCompile(`(?i)DeviceLost|device[ _]lost`)
+var deviceLost = lazyre.New(`(?i)DeviceLost|device[ _]lost`)
 
 // lastSaid is the last n lines of stderr that say more than ggml's
 // startup, joined.

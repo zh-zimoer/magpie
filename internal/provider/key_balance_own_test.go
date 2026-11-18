@@ -123,9 +123,15 @@ func TestTypedBalanceCountsDown(t *testing.T) {
 	if err := SetKeyOwnBalance("plain", "nobody", one); err == nil {
 		t.Error("a key the provider hasn't got a balance")
 	}
-	for _, bad := range []float64{-1, MaxOwnBalance + 1} {
+	for _, bad := range []float64{-MaxOwnBalance - 1, MaxOwnBalance + 1} {
 		if err := SetKeyOwnBalance("plain", "Spare", &OwnBalance{USD: bad}); err == nil {
 			t.Errorf("%v was taken", bad)
+		}
+	}
+	// a key the vendor let run past its balance is typed as it is: below 0
+	for _, ok := range []float64{-1.84, -MaxOwnBalance} {
+		if err := SetKeyOwnBalance("plain", "Spare", &OwnBalance{USD: ok}); err != nil {
+			t.Errorf("%v refused: %v", ok, err)
 		}
 	}
 }
@@ -182,12 +188,12 @@ func TestOwnBalanceParsed(t *testing.T) {
 			t.Errorf("%q: %v %v, want none", in, got, err)
 		}
 	}
-	for _, in := range []string{"lots", "-5", "1000001", "NaN"} {
+	for _, in := range []string{"lots", "--5", "-1000001", "1000001", "NaN"} {
 		if _, err := ParseOwnBalance(in); err == nil {
 			t.Errorf("%q was taken", in)
 		}
 	}
-	n := normalKeyOwnBalances(map[string]OwnBalance{"ABC": {USD: 5}, "bad": {USD: -1}, " ": {USD: 1}})
+	n := normalKeyOwnBalances(map[string]OwnBalance{"ABC": {USD: 5}, "bad": {USD: -2e6}, " ": {USD: 1}})
 	if len(n) != 1 || n["abc"].USD != 5 {
 		t.Errorf("normalised %+v", n)
 	}
@@ -338,7 +344,7 @@ func TestTypedBalanceRefills(t *testing.T) {
 		t.Fatalf("no refill: %+v", e)
 	}
 	// refused: a refill that isn't one; one for a key with no balance
-	for _, bad := range []Refill{{RefillMonth, 0}, {RefillMonth, 32}, {RefillWeek, 8}, {"year", 1}} {
+	for _, bad := range []Refill{{RefillMonth, 0}, {RefillMonth, 32}, {RefillWeek, 8}, {"year", 1}, {RefillDay, 1}} {
 		if err := SetKeyBalanceRefill("monthly", keyID("sk-r"), &bad); err == nil {
 			t.Errorf("%+v taken", bad)
 		}
@@ -348,6 +354,47 @@ func TestTypedBalanceRefills(t *testing.T) {
 	}
 	if err := SetKeyBalanceRefill("keyless", keyID("sk-none"), &Refill{RefillMonth, 1}); err == nil {
 		t.Error("a refill for a key with no balance typed")
+	}
+}
+
+// A balance that refills each day (Kelen_Yc on X: a relay key with a
+// daily allowance) is whole again at local midnight, not UTC's: held in
+// UTC+14 and UTC-11, where the local day and UTC's differ, the spend is
+// counted from the midnight just past and the next is the one after.
+func TestTypedBalanceRefillsDaily(t *testing.T) {
+	probeSandbox(t)
+	probeLocal = false
+	asked := spentStub(t, map[string]float64{keyID("sk-d"): 2})
+	if err := Save(Provider{ID: "daily", Name: "Daily", Chat: "http://127.0.0.1:1/v1", Key: "sk-d"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, zone := range []string{"Pacific/Kiritimati", "Pacific/Pago_Pago", "UTC"} {
+		loc, err := time.LoadLocation(zone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		typed := time.Date(2026, 11, 12, 9, 0, 0, 0, loc)
+		clockStub(t, typed)
+		if err := SetKeyOwnBalance("daily", keyID("sk-d"), &OwnBalance{USD: 5, Refill: &Refill{Every: RefillDay}}); err != nil {
+			t.Fatal(err)
+		}
+		// the same local day, a minute before midnight: from when typed
+		clockStub(t, time.Date(2026, 11, 12, 23, 59, 0, 0, loc))
+		p, _ := Find("daily")
+		e, _ := p.OwnBalanceEstimate(keyID("sk-d"))
+		if !e.From.Equal(typed) || *e.Left != 3 || !e.Next.Equal(time.Date(2026, 11, 13, 0, 0, 0, 0, loc)) {
+			t.Fatalf("%s before midnight: from %v next %v left %v", zone, e.From, e.Next, *e.Left)
+		}
+		// a minute past local midnight: whole again, counted from then
+		clockStub(t, time.Date(2026, 11, 13, 0, 1, 0, 0, loc))
+		q := ownCards(t)["daily|"]
+		mid := time.Date(2026, 11, 13, 0, 0, 0, 0, loc)
+		if !q.Estimate.From.Equal(mid) || !asked[keyID("sk-d")].Equal(mid) || q.Balance != "≈$3.00" {
+			t.Fatalf("%s after midnight: %+v from %v, asked from %v", zone, q, q.Estimate.From, asked[keyID("sk-d")])
+		}
+		if !q.Estimate.Next.Equal(time.Date(2026, 11, 14, 0, 0, 0, 0, loc)) {
+			t.Errorf("%s next refill %v", zone, q.Estimate.Next)
+		}
 	}
 }
 
@@ -375,6 +422,12 @@ func TestRefillDays(t *testing.T) {
 		{Refill{RefillWeek, 1}, at(2026, 11, 8, 10), at(2026, 11, 2, 0), at(2026, 11, 9, 0)},
 		{Refill{RefillWeek, 7}, at(2026, 11, 8, 10), at(2026, 11, 8, 0), at(2026, 11, 15, 0)},
 		{Refill{RefillWeek, 5}, at(2026, 11, 8, 10), at(2026, 11, 6, 0), at(2026, 11, 13, 0)},
+		// each day (Kelen_Yc on X): the midnight before, the one after,
+		// across a month's and a year's end
+		{Refill{RefillDay, 0}, at(2026, 11, 8, 10), at(2026, 11, 8, 0), at(2026, 11, 9, 0)},
+		{Refill{RefillDay, 0}, at(2026, 11, 8, 0), at(2026, 11, 8, 0), at(2026, 11, 9, 0)},
+		{Refill{RefillDay, 0}, at(2026, 11, 30, 23), at(2026, 11, 30, 0), at(2026, 12, 1, 0)},
+		{Refill{RefillDay, 0}, at(2026, 12, 31, 23), at(2026, 12, 31, 0), at(2027, 1, 1, 0)},
 	} {
 		if l, n := c.r.Last(c.now), c.r.Next(c.now); !l.Equal(c.last) || !n.Equal(c.next) {
 			t.Errorf("%+v at %v: last %v next %v, want %v and %v", c.r, c.now, l, n, c.last, c.next)
@@ -393,13 +446,24 @@ func TestOwnBalanceParsedInYuanAndRefill(t *testing.T) {
 	if b, err := ParseOwnBalance("12 usd"); err != nil || b.CNY != nil || b.USD != 12 {
 		t.Errorf("12 usd: %+v %v", b, err)
 	}
-	for _, in := range []string{"¥-1", "¥lots", "¥", "¥2000000"} {
+	// overdrawn: below 0, the sign before or after the currency's
+	for in, want := range map[string]float64{"-1.84": -1.84, "-$1.84": -1.84, "$-1.84": -1.84, "-1.84 usd": -1.84} {
+		if b, err := ParseOwnBalance(in); err != nil || b == nil || b.CNY != nil || b.USD != want {
+			t.Errorf("%q: %+v %v, want $%v", in, b, err, want)
+		}
+	}
+	for _, in := range []string{"-¥5", "¥-5", "-5元", "-5 cny"} {
+		if b, err := ParseOwnBalance(in); err != nil || b == nil || b.CNY == nil || *b.CNY != -5 {
+			t.Errorf("%q: %+v %v, want ¥-5", in, b, err)
+		}
+	}
+	for _, in := range []string{"¥--1", "¥lots", "¥", "¥2000000", "¥-2000000", "-$-5"} {
 		if _, err := ParseOwnBalance(in); err == nil {
 			t.Errorf("%q taken", in)
 		}
 	}
 	for in, want := range map[string]Refill{"monthly": {RefillMonth, 1}, "monthly:15": {RefillMonth, 15}, "weekly": {RefillWeek, 1},
-		"weekly:fri": {RefillWeek, 5}, "weekly:Sunday": {RefillWeek, 7}, "weekly:3": {RefillWeek, 3}} {
+		"weekly:fri": {RefillWeek, 5}, "weekly:Sunday": {RefillWeek, 7}, "weekly:3": {RefillWeek, 3}, "daily": {RefillDay, 0}, "Day": {RefillDay, 0}} {
 		if r, err := ParseRefill(in); err != nil || r == nil || *r != want {
 			t.Errorf("%q: %+v %v, want %+v", in, r, err, want)
 		}
@@ -410,14 +474,17 @@ func TestOwnBalanceParsedInYuanAndRefill(t *testing.T) {
 	if r, err := ParseRefill("off"); err != nil || r != nil {
 		t.Errorf("off: %+v %v", r, err)
 	}
-	for _, in := range []string{"monthly:0", "monthly:32", "monthly:x", "weekly:x", "yearly", "--help"} {
+	for _, in := range []string{"monthly:0", "monthly:32", "monthly:x", "weekly:x", "yearly", "--help", "daily:1"} {
 		if _, err := ParseRefill(in); err == nil {
 			t.Errorf("%q taken", in)
 		}
 	}
-	n := normalKeyOwnBalances(map[string]OwnBalance{"a": {USD: 5, Refill: &Refill{"year", 1}}})
+	n := normalKeyOwnBalances(map[string]OwnBalance{"a": {USD: 5, Refill: &Refill{"year", 1}}, "b": {USD: 5, Refill: &Refill{RefillDay, 0}}})
 	if n["a"].USD != 5 || n["a"].Refill != nil {
 		t.Errorf("a refill that isn't one, written by hand: %+v", n)
+	}
+	if n["b"].Refill == nil || *n["b"].Refill != (Refill{RefillDay, 0}) {
+		t.Errorf("a daily refill was dropped as read back: %+v", n["b"])
 	}
 }
 

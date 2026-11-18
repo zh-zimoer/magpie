@@ -4,7 +4,8 @@
 // own usage prices the calls it sends on the key (provider/
 // key_balance_own.go). Typing it again sets it anew. It may be typed in
 // yuan ("¥100", or picked beside the field, which starts at the balance's
-// own currency, else Settings' one), and may refill each month or week.
+// own currency, else Settings' one), and may refill each month, week or
+// day (Kelen_Yc on X).
 // Credit may come on top that expires on a day, in grants (promotional
 // credit twice, gone on two days: tenacious_eagle_96548), the one that
 // goes soonest spent first: the pill says how much of each is left and in
@@ -16,13 +17,16 @@ const moneyText = (v, cny) => (v < 0 ? "-" : "") + (cny ? "¥" : "$") + Math.abs
 // balanceAmount reads what was typed: an amount and whether it is in
 // yuan, a sign or a word saying which, else unit; null for none
 function balanceAmount(s, unit) {
-  let a = s.trim().toLowerCase(), cny = unit === "cny";
+  let a = s.trim().toLowerCase(), cny = unit === "cny", neg = false;
+  // a sign may come before the currency's: -$1.84, -¥5
+  if (/^[-−]\s*[^\d.\s]/.test(a)) { neg = true; a = a.slice(1).trim(); }
   const yuan = /^(¥|￥|cny|rmb)\s*|\s*(元|cny|rmb|yuan)$/g, usd = /^\$\s*|\s*usd$/g;
   if (yuan.test(a)) { a = a.replace(yuan, ""); cny = true; }
   else if (usd.test(a)) { a = a.replace(usd, ""); cny = false; }
   a = a.replace(/,/g, "").trim();
-  const n = Number(a);
-  return a && n >= 0 && n <= 1e6 ? { n, cny } : null;
+  const n = Number(a.replace(/^−/, "-")) * (neg ? -1 : 1);
+  // below 0 is a key the vendor let run past its balance
+  return a && Math.abs(n) <= 1e6 ? { n, cny } : null;
 }
 // dayOf: a day as the date it is here, 2026-12-31; dateText: one shown
 const dayOf = (d) => [d.getFullYear(), d.getMonth() + 1, d.getDate()].map((n) => String(n).padStart(2, "0")).join("-");
@@ -68,6 +72,7 @@ function keyBalancePill(p, k) {
   const refill = (r) => accountAction("provider/keybalancerefill", { id: p.id, account: k.id, refill: r },
     !r ? t("{who} no longer refills", { who: name })
       : r.every === "week" ? t("{who} refills each {weekday}", { who: name, weekday: weekdayName(r.day) })
+      : r.every === "day" ? t("{who} refills each day", { who: name })
       : t("{who} refills on day {day} of each month", { who: name, day: r.day }));
   const expiring = (v) => accountAction("provider/keyexpiring", { id: p.id, account: k.id, expiring: v },
     !v ? t("{who} has no credit that expires", { who: name }) : t("{who} has {amount} that counts through {last}", { who: name, amount: moneyText(v.amount, cny), last: dateText(v.until) }));
@@ -129,7 +134,7 @@ function keyBalancePill(p, k) {
   const type = () => {
     const at = pill.parentNode;
     pillNumber(pill, b ? String(b.set) : "", "", "abal-in", "", (s) => balanceAmount(s, unit),
-      t("A balance is an amount from 0 to 1,000,000, in USD or in yuan (¥)"), null, set);
+      t("A balance is an amount from -1,000,000 to 1,000,000, in USD or in yuan (¥)"), null, set);
     const i = at?.querySelector(":scope > .abal-in");
     if (!i) return;
     const cur = el("button", "abal-cur"), save = i.onblur;
@@ -184,9 +189,11 @@ function keyBalancePill(p, k) {
       ...xs.length > 1 || b.expired ? [{ v: "noexp", name: "No credit that expires", note: "" }] : [],
       { v: "month", name: "Refills each month…", note: "" },
       { v: "week", name: "Refills each week…", note: "" },
+      { v: "day", name: "Refills each day", note: "" },
       { v: "never", name: "Never refills", note: "" },
       { v: "off", name: "No balance", note: "" },
     ], b.refill?.every || "never", (v) => v === "off" ? set(null) : v === "exp" ? credit() : v === "noexp" ? expiring(null) : v === "month" ? monthly() : v === "week" ? weekly()
+      : v === "day" ? refill({ every: "day", day: 0 })
       : v === "never" ? b.refill && refill(null) : v[0] === "x" ? unexpiring(xs[+v.slice(1)]) : type(), "Balance", "sess-menu");
     // a grant that goes within a week says so in amber, as on the pill
     const items = protoMenu?.box.querySelectorAll(".pm-item");

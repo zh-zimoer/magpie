@@ -1,7 +1,7 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
 // How long before a Codex reset about to run out unused it is used (the
-// owner, 10-30: 把提前用卡的时间做成可配置的): one pick under Settings ›
-// Usage's "Codex: auto-use resets", for every account, from the app's menu
+// owner, 10-30: 把提前用卡的时间做成可配置的): one pick under "Auto-use resets"
+// in Codex's provider editor, for every account, from the app's menu
 // (no native select). Unset it reads half an hour, the default; a pick
 // posts settings/codex-reset-lead with its minutes and the row, and the
 // "before one expires" titles, say the new lead. A value set outside the
@@ -16,7 +16,12 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { watchSettingsReads, settingsDrawn, reach } = require("./reader.cjs");
+const { watchSettingsReads, settingsDrawn, provPrefsProviders, openProvPrefs, inEditor } = require("./reader.cjs");
+
+// scrolls: the page's scroll and where the lead's row is on the screen. In
+// the editor a click holds what was pressed where it was (modalHold), so
+// the editor's own scrollTop may change to keep the row still.
+const scrolls = (page) => page.evaluate(() => [scrollY, Math.round(document.querySelector("#codexResetLeadRow .name").getBoundingClientRect().top)].join(","));
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -61,6 +66,7 @@ function server(lang, users, posts, lead) {
       if (req.method() === "POST") cur = { ...cur, ...req.postDataJSON() };
       return json(cur);
     }
+    if (url.pathname === "/api/providers") return json(provPrefsProviders(["codex"], { codex: "Codex" }));
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (url.pathname === "/api/usage/quotas") return json([]);
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
@@ -89,12 +95,12 @@ async function open(t, engine, lang, width, lead, posts) {
   page.setDefaultTimeout(5000);
   page.setDefaultNavigationTimeout(60000);
   const errors = [];
-  page.on("pageerror", (e) => errors.push(e.message));
+  page.on("pageerror", (e) => { if (engine === "webkit" && /due to access control checks/.test(e.message)) return; errors.push(e.message); }); // a goto in WebKit can cut off a fetch (#1350)
   await page.route("**/*", server(lang, users, posts, lead));
   await watchSettingsReads(page);
-  await page.goto("http://magpie.test/?view=settings&tab=usage");
+  await openProvPrefs(page, "codex");
   await settingsDrawn(page);
-  await page.locator("#codexResetLeadRow").waitFor();
+  await page.locator(".editor .prov-prefs #codexResetLeadRow").waitFor();
   return { page, errors };
 }
 
@@ -108,7 +114,7 @@ const say = (page, lang, m) => page.evaluate(([lang, m]) => {
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of langs) {
     for (const width of [1100, 420]) {
-      test(`${engine} ${lang} ${width}: Settings › Usage picks how early a reset about to expire is used`, async (t) => {
+      test(`${engine} ${lang} ${width}: Codex's editor picks how early a reset about to expire is used`, async (t) => {
         const posts = [];
         const { page, errors } = await open(t, engine, lang, width, undefined, posts);
         const row = page.locator("#codexResetLeadRow");
@@ -116,7 +122,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // translated, its name and its words
         if (lang !== "en") {
           const name = (await row.locator(".name").textContent()).trim();
-          assert.notEqual(name, "Codex: how early before one expires", "name translated");
+          assert.notEqual(name, "How early before one expires", "name translated");
           assert.notEqual((await row.locator(".sub").textContent()).trim().slice(0, 20), "For every account wi", "words translated");
         }
         const pick = row.locator("button.reset-lead");
@@ -131,8 +137,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const half = await page.evaluate((lang) => (I18N[lang]?.["{n} min"] || "{n} min").replace("{n}", 30), lang);
         assert((await exp.getAttribute("title")).includes(half), "the title says half an hour");
 
-        await reach(page, pick);
-        const top = await page.locator("#view-settings").evaluate((v) => v.scrollTop);
+        await inEditor(page, pick);
+        const top = await scrolls(page);
         await pick.click();
         const items = page.locator(".proto-menu .pm-item");
         assert.equal(await items.count(), 12, "3 min to 24 h, then Custom…");
@@ -144,14 +150,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const title = await page.locator(".ar-own").first().locator('.ar-own-case[data-case="expiring"] .ar-own-say').getAttribute("title");
         const hours = await page.evaluate((lang) => (I18N[lang]?.["{n} h"] || "{n} h").replace("{n}", 3), lang);
         assert(title.includes(hours), `the title says 3 h: ${title}`);
-        assert.equal(await page.locator("#view-settings").evaluate((v) => v.scrollTop), top, "no click moved the page");
+        assert.equal(await scrolls(page), top, "no click moved the page");
         // the shortest, three minutes (shangyuan0818 on Discord asked for less than 15)
         await pick.click();
         await page.locator(`.proto-menu .pm-item .pm-name:text-is(${JSON.stringify(await say(page, lang, 3))})`).click(); // not "3 h before"
         for (let i = 0; i < 100 && posts.length < 2; i++) await page.waitForTimeout(20);
         assert.deepEqual(posts, [{ minutes: 180 }, { minutes: 3 }]);
         await page.waitForFunction((want) => document.querySelector("#codexResetLeadRow button.reset-lead .rl-say > .on")?.textContent.trim() === want, await say(page, lang, 3));
-        assert.equal(await page.locator("#view-settings").evaluate((v) => v.scrollTop), top, "no click moved the page");
+        assert.equal(await scrolls(page), top, "no click moved the page");
 
         // Custom…: the last item, a field of minutes in the row, focused
         const custom = await page.evaluate((lang) => I18N[lang]?.["Custom…"] || "Custom…", lang);
@@ -167,9 +173,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await ownField();
         assert.equal(await own.inputValue(), "3", "it starts at the lead");
         assert.equal(await own.getAttribute("inputmode"), "numeric");
-        const r = await own.boundingBox(), v = await page.locator("#view-settings").boundingBox();
+        const r = await own.boundingBox(), v = await page.locator(".editor .prov-prefs[data-list=codexResetList]").boundingBox();
         assert(r.x >= v.x && r.x + r.width <= v.x + v.width + 1, "the field fits");
-        assert.equal(await page.locator("#view-settings").evaluate((v) => v.scrollTop), top, "opening the field moved nothing");
+        assert.equal(await scrolls(page), top, "opening the field moved nothing");
         await own.fill("7");
         await own.press("Enter");
         for (let i = 0; i < 100 && posts.length < 3; i++) await page.waitForTimeout(20);
@@ -193,15 +199,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // leaving the field saves it
         await ownField();
         await own.fill("12");
-        await page.locator("#codexResetLeadRow .name").click();
+        const name = page.locator("#codexResetLeadRow .name");
+        await inEditor(page, name); // in sight first, so the click itself scrolls nothing
+        const before = await scrolls(page);
+        await name.click();
         for (let i = 0; i < 100 && posts.length < 4; i++) await page.waitForTimeout(20);
         assert.deepEqual(posts.at(-1), { minutes: 12 });
         await page.waitForFunction((want) => document.querySelector("#codexResetLeadRow button.reset-lead .rl-say > .on")?.textContent.trim() === want, await say(page, lang, 12));
-        assert.equal(await page.locator("#view-settings").evaluate((v) => v.scrollTop), top, "no click moved the page");
+        assert.equal(await scrolls(page), before, "no click moved the page");
 
         // fits, no sideways scroll, no native select, no left border
         const over = await page.evaluate(() => {
-          const view = document.querySelector("#view-settings").getBoundingClientRect();
+          const view = document.querySelector(".editor .prov-prefs[data-list=codexResetList]").getBoundingClientRect();
           return [...document.querySelectorAll("#codexResetLeadRow, #codexResetLeadRow *")]
             .filter((e) => { const r = e.getBoundingClientRect(); return r.width && (r.right > view.right + 1 || r.left < view.left - 1); })
             .map((e) => e.className + " " + e.textContent.slice(0, 30));
@@ -209,7 +218,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(over, []);
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, "no sideways scroll");
         assert.equal(await row.evaluate((e) => getComputedStyle(e).borderLeftWidth), "0px");
-        assert.equal(await page.locator("#view-settings select").count(), 0, "no native select");
+        assert.equal(await page.locator(".editor select").count(), 0, "no native select");
         assert.deepEqual(errors, []);
       });
     }
@@ -220,7 +229,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const { page, errors } = await open(t, engine, "en", 900, 45, posts);
     const pick = page.locator("#codexResetLeadRow button.reset-lead");
     assert.equal((await pick.locator(".rl-say > .on").textContent()).trim(), "45 min before");
+    await inEditor(page, pick);
     await pick.click();
+    await page.locator(".proto-menu .pm-item").first().waitFor();
     assert.equal(await page.locator(".proto-menu .pm-item").count(), 13);
     assert.equal(await page.locator(".proto-menu .pm-item.on .pm-name").textContent(), "45 min before");
     await page.keyboard.press("Escape");
@@ -239,9 +250,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     page.setDefaultNavigationTimeout(60000);
     await page.route("**/*", server("en", [], [], undefined));
     await watchSettingsReads(page);
-    await page.goto("http://magpie.test/?view=settings&tab=usage");
+    await openProvPrefs(page, "codex");
     await settingsDrawn(page);
-    await page.locator("#resetReminderSegs .opt").first().waitFor();
+    await page.locator(".editor .prov-prefs #warmSegs .opt").first().waitFor();
     assert.equal(await page.locator("#codexResetLeadRow").isVisible(), false);
   });
 }

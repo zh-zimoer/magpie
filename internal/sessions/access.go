@@ -211,7 +211,11 @@ func Found() []string {
 			}
 		}
 	}
-	add("claude", filepath.Join(ClaudeDir(), "projects"))
+	var claude []string
+	for _, d := range ClaudeDirs() {
+		claude = append(claude, filepath.Join(d, "projects"))
+	}
+	add("claude", claude...)
 	var desktop []string
 	for _, d := range callDesktopDirs() {
 		desktop = append(desktop, filepath.Join(d, "local-agent-mode-sessions"), filepath.Join(d, "claude-code-sessions"))
@@ -240,10 +244,21 @@ func Found() []string {
 	add("cursor", filepath.Join(CursorDir(), "chats"), filepath.Join(cursorDataDir(), "projects"), cursorEditorDB())
 	add("hermes", HermesDirs()...)
 	add("alma", almaDB())
+	add("openmausbot", ombDB())
+	add("liveagent", liveagentSessions())
 	add("minimax-code", minimaxSessions())
-	add("kimi", kimiSessions())
+	kimi := []string{kimiSessions()}
+	for _, sh := range kimiWorkShares() {
+		kimi = append(kimi, filepath.Join(kimiWorkRuntime(sh), "home", "sessions"))
+	}
+	add("kimi", kimi...)
 	add("agy", filepath.Join(AgyDir(), "brain"))
 	add("antigravity", antigravityConversations(), filepath.Join(AntigravityInsidersDir(), "conversations"))
 	add("gemini", geminiTmpDir())
+	var devin []string
+	for _, d := range DevinCLIDirs() {
+		devin = append(devin, filepath.Join(d, "sessions.db"), filepath.Join(d, "sessions"))
+	}
+	add("devin", devin...)
 	return out
 }

@@ -49,6 +49,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await t.test(`${lang}, ${retrieval} retrieval`, async () => {
         const page = await (await browser.newContext({ viewport: { width: 900, height: 760 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, [relay(retrieval)], retrieval));
@@ -56,7 +57,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
         // the add form's Fetch models
         await page.locator("#addProvider").click();
-        await page.locator("#addSheet .custom-foot .custom").click();
+        await page.locator("#addSheet .row-head .custom").click();
         const ed = page.locator(".editor.new");
         await ed.locator(".add-models").waitFor();
         await ed.locator('input[type="url"][placeholder="https://…/v1"]').first().fill("http://embed.test/v1");

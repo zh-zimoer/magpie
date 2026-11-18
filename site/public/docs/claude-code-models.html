@@ -121,6 +121,29 @@
      }
     }
    ]
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "Docs",
+     "item": "https://usemagpie.ai/docs/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "Use DeepSeek, Kimi, GLM, Qwen or any model in Claude Code",
+     "item": "https://usemagpie.ai/docs/claude-code-models"
+    }
+   ]
   }
  ]
 }
@@ -240,7 +263,7 @@ magpie claude haiku ""                           # back to the main model</pre><
     <p>Sign in to the subscription in magpie: <span class="ui">＋ Add provider</span>, then the ChatGPT or Copilot tile. magpie opens the vendor’s own sign-in page. The account’s models then show in Claude Code’s picker as <code>codex/…</code> or <code>copilot/…</code>.</p>
     <div class="code"><span class="lang">Terminal</span><button class="copy" data-copy="ex-cc-gpt">Copy</button><pre id="ex-cc-gpt">magpie accounts add codex      # sign in to a ChatGPT account
 magpie claude codex/gpt-5.5</pre></div>
-    <p>Claude Code still speaks Anthropic Messages. magpie translates each request for the GPT model and the reply back, tool calls included. Antigravity accounts work the same way, as <code>antigravity/…</code>.</p>
+    <p>Claude Code still speaks Anthropic Messages. magpie translates each request for the GPT model and the reply back, tool calls included. Antigravity accounts work the same way, as <code>antigravity/…</code>. For a ChatGPT plan in full, tiers, effort and limits included, see <a href="/docs/claude-code-chatgpt">ChatGPT in Claude Code</a>.</p>
 
     <h2 id="routing"><a class="anchor" href="#routing">Routing over several keys</a></h2>
     <p>With several keys or accounts, magpie can spread Claude Code’s requests over them and move on when one runs out.</p>
@@ -251,7 +274,7 @@ magpie claude codex/gpt-5.5</pre></div>
     </ul>
     <p>The routing modes are in <a href="/docs/start#routing">Get started</a>.</p>
 
-    <p><b>By provider:</b> <a href="/docs/deepseek">DeepSeek</a> · <a href="/docs/kimi">Kimi and Kimi Code</a> · <a href="/docs/glm">GLM Coding Plan</a></p>
+    <p><b>By provider:</b> <a href="/docs/deepseek">DeepSeek</a> · <a href="/docs/kimi">Kimi and Kimi Code</a> · <a href="/docs/glm">GLM Coding Plan</a> · <a href="/docs/volcengine">Volcengine Ark</a> · <a href="/docs/tencent-cloud">Tencent Cloud</a> · <a href="/docs/baidu-qianfan">Baidu Qianfan</a> · <a href="/docs/siliconflow">SiliconFlow</a> · <a href="/docs/modelscope">ModelScope</a> · <a href="/docs/huaweicloud">Huawei Cloud MaaS</a> · <a href="/docs/xiaomi-mimo">Xiaomi MiMo</a> · <a href="/docs/stepfun">StepFun</a> · <a href="/docs/longcat">LongCat</a> · <a href="/docs/qwen">Qwen</a> · <a href="/docs/minimax">MiniMax</a> · <a href="/docs/anthropic">Anthropic</a> · <a href="/docs/openai">OpenAI</a> · <a href="/docs/gemini">Gemini</a> · <a href="/docs/grok">Grok</a> · <a href="/docs/mistral">Mistral</a> · <a href="/docs/openrouter">OpenRouter</a> · <a href="/docs/copilot">GitHub Copilot</a> · <a href="/docs/ollama">Ollama</a></p>
 
     <h2 id="faq"><a class="anchor" href="#faq">FAQ</a></h2>
     <h3>Do I set <code>ANTHROPIC_BASE_URL</code> myself?</h3>
@@ -269,7 +292,7 @@ magpie claude codex/gpt-5.5</pre></div>
     <h3>How do I undo it?</h3>
     <p>Pick one of Claude Code’s own models in magpie, or run <code>magpie claude default</code>. What magpie wrote comes out, and what it replaced comes back.</p>
 
-    <p style="margin-top:48px">Using Codex too? See <a href="/docs/codex-models">Use any model in Codex</a>. Stuck? Ask on <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>.</p>
+    <p style="margin-top:48px">Using Codex too? See <a href="/docs/codex-models">Use any model in Codex</a>. On Claude Desktop? See <a href="/docs/claude-desktop">Claude Desktop on any model</a>. Stuck? Ask on <a href="https://discord.gg/vGSnD3ZKQF">Discord</a>.</p>
   </article>
 </main>
 

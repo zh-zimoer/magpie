@@ -103,6 +103,9 @@ const (
 func (n *notifier) send(title, body string) { n.sendAs("magpie-alert-", title, body) }
 
 func (n *notifier) sendAs(kind, title, body string) {
+	// every alert goes to Bark too, when it is set, whether or not the
+	// system lets this computer notify (EV_John_Liu on X)
+	barkPush(title, body)
 	if !n.allowed() {
 		return
 	}
@@ -183,21 +186,22 @@ func (h *host) watchAlerts() {
 			go n.allowed()
 		}
 		// a value masked for the first time (Must2333 on X)
-		masks := newMaskAlerts(func() bool { return settings.Load().MaskAlert }, func(m maskNote) {
-			title, body := maskAlertText(trayLang(settings.Load().Lang, systemLang), m, agentName)
+		masks := newMaskAlerts(func() bool { return settings.Shared().MaskAlert }, func(m maskNote) {
+			title, body := maskAlertText(trayLang(settings.Shared().Lang, systemLang), m, agentName)
 			n.sendAs(fmt.Sprintf("%s%d-", maskNotice, m.Key), title, body)
 		})
 		gateway.OnMasked = masks.add
 		// an agent's turn done, past the length set (itieniu on X)
 		gateway.TurnDone = func(t gateway.TurnEnd) {
-			title, body := turnDoneText(trayLang(settings.Load().Lang, systemLang), agentName(t.Agent), t)
+			title, body := turnDoneText(trayLang(settings.Shared().Lang, systemLang), agentName(t.Agent), t)
 			n.sendAs(turnNotice, title, body)
 		}
 		// an account in use signed out, or a Claude sign-in about to end
 		// (steven_4422 on Discord): always on, as the account's Sign in
 		// again is
+		go watchBarkDaily(backendCtx)
 		go provider.WatchSignIns(backendCtx, func(a provider.SignInAlert) {
-			title, body := signInText(trayLang(settings.Load().Lang, systemLang), a, time.Now())
+			title, body := signInText(trayLang(settings.Shared().Lang, systemLang), a, time.Now())
 			n.sendAs(signInKind(a.Provider), title, body)
 		})
 		// until this one has handed the gateway to the new version,

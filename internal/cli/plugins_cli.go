@@ -604,7 +604,8 @@ func pluginLogin(ctx context.Context, name, method string) error {
 		// window's sign-in installs it (#2223: Grok Build in Docker)
 		if name := pluginSignInCLI.missing(pp.ID); name != "" {
 			fmt.Println(amber.Render("!"), name, "isn't installed here: "+pp.Name+" signs in through it. Installing it, as its vendor's installer does…")
-			if err := pluginSignInCLI.install(ctx, pp.ID); err != nil {
+			// through the proxy the sign-in and the provider's requests take
+			if err := pluginSignInCLI.install(provider.Via(ctx, provider.PluginID(pp.ID)), pp.ID); err != nil {
 				return err
 			}
 			fmt.Println(green.Render("✓"), name, "installed")
@@ -640,7 +641,7 @@ func pluginLogin(ctx context.Context, name, method string) error {
 	var saved plugin.Saved
 	if pp.Methods[m].Type == "api" {
 		key := ""
-		if !pp.Methods[m].Keyless {
+		if !pp.Methods[m].NoKey() {
 			var err error
 			key, err = secret("key", keyPrompt(pp.Name, pp.Methods[m]), false)
 			if err != nil {
@@ -658,7 +659,7 @@ func pluginLogin(ctx context.Context, name, method string) error {
 		if a.URL != "" {
 			// the user may keep sign-in pages to a browser of their own; a
 			// page the plugin's CLI opened itself is open either way
-			linkOnly := settings.Load().SignInLinkOnly && !a.Opened
+			linkOnly := settings.Shared().SignInLinkOnly && !a.Opened
 			if linkOnly {
 				fmt.Println("Open this link in the browser you sign in with:")
 			} else {

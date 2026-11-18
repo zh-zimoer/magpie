@@ -1,32 +1,33 @@
 /* Library: instructions, MCP servers and skills for every agent. */
 #view-library { gap: 0; }
 /* The tabs stay at the top while the page scrolls under them, on a frosted
-   strip as wide as the view; a hairline shows once something is beneath.
-   The strip's own box keeps to the view's content box and its ::before
-   reaches out over the view's padding (--bleed-l/-r): a box that ran past
-   the content's end edge, by a negative margin, was 16px of sideways
+   strip that shows, with a hairline, once something is beneath. At the
+   page's top nothing is: the strip is not drawn, so over a background
+   picture there is no square box around the rounded tabs (CHENGJIAHEGOXIS
+   on X). Under the tabs it is 4px out from them at the sides and the foot,
+   with the tabs' radius plus those 4px. The strip's own box keeps to the
+   view's content box and only its ::before reaches past it: a box that ran
+   past the content's end edge, by a negative margin, was 16px of sideways
    scroll in macOS 15's WebKit, which leaves a negative margin-end out of
    a flex scroller's scrollable width (#1236). */
 .lib-head {
   position: sticky; top: 0; z-index: 5;
   display: flex; align-items: center; gap: 8px; flex: none;
   margin: 0; padding: 6px 0 4px;
-  --bleed-l: 12px; --bleed-r: 12px;
 }
 .lib-head::before {
   content: ""; position: absolute; z-index: -1; pointer-events: none;
-  top: 0; bottom: 0; left: calc(-1 * var(--bleed-l)); right: calc(var(--bar, 0px) - var(--bleed-r)); /* the bar's room is out of the padding */
+  top: 0; bottom: 0; left: -4px; right: -4px; border-radius: 0 0 11px 11px;
   background: color-mix(in srgb, var(--bg) 92%, transparent);
   -webkit-backdrop-filter: saturate(1.6) blur(16px); backdrop-filter: saturate(1.6) blur(16px);
-  box-shadow: 0 1px 0 transparent; transition: box-shadow .18s var(--ease);
+  box-shadow: 0 1px 0 transparent; opacity: 0; transition: opacity .18s var(--ease-out), box-shadow .18s var(--ease);
 }
 /* the window's view is padded 2px at the top: the strip reaches over it */
-body.window .lib-head { top: -2px; margin: -2px 0 0; padding: 8px 0 4px; --bleed-l: 16px; --bleed-r: 16px; }
+body.window .lib-head { top: -2px; margin: -2px 0 0; padding: 8px 0 4px; }
 @media (max-width: 760px), (pointer: coarse) and (max-width: 1024px) {
   body.web .lib-head {
     flex-wrap: wrap;
     margin: -2px 0 0; padding: 8px 0 4px;
-    --bleed-l: var(--view-left); --bleed-r: var(--view-right);
   }
   body.web .lib-tabs { max-width: 100%; flex-wrap: wrap; }
   body.web .lib-more, body.web .lib-discover, body.web .lib-backups { flex: none; }
@@ -43,7 +44,7 @@ body.window .lib-head { top: -2px; margin: -2px 0 0; padding: 8px 0 4px; --bleed
    tabs wrap onto a second line rather than scroll the view sideways */
 .lib-tabs { max-width: 100%; flex-wrap: wrap; }
 .lib-headacts { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
-.lib-head.stuck::before { box-shadow: 0 1px 0 var(--line-2); }
+.lib-head.stuck::before { opacity: 1; box-shadow: 0 1px 0 var(--line-2); }
 .lib-tabs .opt { height: 24px; padding: 0 12px; font-size: 12.5px; }
 .lib-more, .lib-discover, .lib-backups { display: inline-flex; align-items: center; gap: 5px; }
 .lib-mini { display: inline-grid; place-items: center; color: var(--muted); }
@@ -200,6 +201,11 @@ button.row.lib-hubfolded:hover { background: var(--pill); }
 /* off on this computer: its agents' ticks are the other computers', shown faded and not to be changed here */
 .lib-skill.offhere > .lib-glyph, .lib-skill.offhere > .lib-logo, .lib-skill.offhere .sub { opacity: .55; }
 .lib-skill.offhere > .lib-agents { opacity: .4; pointer-events: none; }
+/* a server off for everyone (serverSwitch): its switch turns it on again,
+   giving back the agents it had, so its chips wait for that */
+.lib-server.off > .lib-glyph, .lib-server.off > .lib-logo, .lib-server.off .name, .lib-server.off .sub { opacity: .55; }
+.lib-server.off > .lib-agents { opacity: .4; pointer-events: none; }
+.lib-server > .lib-switch { align-self: center; margin-left: 8px; }
 .lib-hereline { display: flex; margin-top: 3px; min-width: 0; }
 .lib-hereline > .lib-tag.lib-offhere { cursor: pointer; margin-left: 0; flex: 0 1 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .lib-tag.lib-offhere:hover { color: var(--fg); }
@@ -234,6 +240,8 @@ button.row.lib-hubfolded:hover { background: var(--pill); }
 .lib-tag.lib-new.link { cursor: pointer; }
 .lib-tag.lib-new.link:hover { background: color-mix(in srgb, var(--accent) 22%, var(--accent-soft)); }
 .lib-tag.lib-unchecked { color: var(--faint); font-weight: 400; }
+.lib-tag.lib-unchecked.link { cursor: pointer; }
+.lib-tag.lib-unchecked.link:hover { color: var(--fg-2); }
 .lib-tag.lib-signed { color: var(--green); background: var(--green-soft); }
 .lib-tag.lib-signed::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 
@@ -250,8 +258,11 @@ button.row.lib-hubfolded:hover { background: var(--pill); }
 
 /* the switch */
 .lib-switch { flex: none; position: relative; width: 32px; height: 19px; border-radius: 10px; background: var(--line); transition: background .2s var(--ease); }
+/* an empty line of text at the switch's middle: its baseline is a text
+   line's, so a form row's name sits level with it (form-align.test.cjs) */
+.lib-switch::before { content: "\200b"; font-size: 12px; line-height: 19px; }
 .lib-switch i { position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform .22s var(--ease); }
-.lib-switch.on { background: var(--fg); }
+.lib-switch.on { background: var(--mark); }
 .lib-switch.on i { transform: translateX(13px); background: var(--card); }
 :root[data-theme="dark"] .lib-switch.on i { background: var(--bg); }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .lib-switch.on i { background: var(--bg); } }
@@ -260,8 +271,8 @@ button.row.lib-hubfolded:hover { background: var(--pill); }
 .lib-sets .lib-cardhead { padding-bottom: 8px; }
 .lib-radio { flex: none; width: 17px; height: 17px; border-radius: 50%; border: 1.5px solid var(--faint); display: grid; place-items: center; transition: border-color .14s; }
 .lib-radio:hover { border-color: var(--fg-2); }
-.lib-radio.on { border-color: var(--fg); }
-.lib-radio.on::after { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--fg); }
+.lib-radio.on { border-color: var(--mark); }
+.lib-radio.on::after { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--mark); }
 .lib-set.on .name { font-weight: 600; }
 .lib-sets .lib-detail { padding-left: 40px; }
 .lib-sets > .lib-cardhead + .row, .lib-sets .lib-detail + .row, .lib-sets .lib-detail + .lib-setadd, .lib-sets .row + .lib-setadd { border-top: 1px solid var(--line-2); }
@@ -275,9 +286,11 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 
 /* an agent's instructions, opened */
 .lib-detail { padding: 4px 14px 14px 50px; background: var(--card-2); display: flex; flex-direction: column; gap: 8px; border-top: 0 !important; animation: content-in .2s var(--ease); }
+/* open before the render that drew it again: no second entrance */
+.lib-detail.kept { animation: none; }
 .lib-lab { font-size: 11.5px; color: var(--muted); }
 .lib-detail .lib-aside { margin: 0; }
-.lib-acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.lib-acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .lib-warn { font-size: 12px; line-height: 1.5; color: var(--fg); background: var(--amber-soft); border-radius: 8px; padding: 8px 10px; }
 .lib-warn .lib-path { display: inline; }
 /* what the last change couldn't write: for which agent, and why */
@@ -351,13 +364,13 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
    it never move. The cards are dealt out one after another, the one with
    the furthest to go first, so none passes over another, and go back
    together, quicker. Transform stays free for the press. */
-.lib-row > .lib-agents .lib-ag[data-agent] { translate: calc(var(--k, 0) * (var(--lib-fan) - var(--lib-stack))) 0; }
-.lib-row > .lib-agents:hover .lib-ag[data-agent], .lib-row > .lib-agents:focus-within .lib-ag[data-agent] { translate: 0 0; transition-delay: 0s, 0s, 0s, 0s, 0s, calc((var(--lib-agent-count, 1) - 1 - var(--k, 0)) * var(--lib-step)); }
+.lib-row > .lib-agents .lib-ag[data-agent], .lib-row > .lib-agents .lib-ag[data-members] { translate: calc(var(--k, 0) * (var(--lib-fan) - var(--lib-stack))) 0; }
+.lib-row > .lib-agents:hover .lib-ag[data-agent], .lib-row > .lib-agents:focus-within .lib-ag[data-agent], .lib-row > .lib-agents:hover .lib-ag[data-members], .lib-row > .lib-agents:focus-within .lib-ag[data-members] { translate: 0 0; transition-delay: 0s, 0s, 0s, 0s, 0s, calc((var(--lib-agent-count, 1) - 1 - var(--k, 0)) * var(--lib-step)); }
 .lib-row > .lib-agents .lib-ag { flex: none; width: 24px; min-width: 0; height: 24px; padding: 0 0 0 4px; justify-content: flex-start; background: var(--card); border-color: var(--line-2); box-shadow: none; transition: background .14s, border-color .14s, transform .14s var(--ease), outline-color .2s, box-shadow .2s, translate .22s cubic-bezier(.32, .72, 0, 1); }
 .lib-row > .lib-agents:hover .lib-ag, .lib-row > .lib-agents:focus-within .lib-ag { transition-duration: .14s, .14s, .14s, .2s, .2s, .3s; transition-timing-function: ease, ease, var(--ease), ease, ease, cubic-bezier(.23, 1, .32, 1); }
 .lib-row > .lib-agents { --lib-step: min(16ms, calc(120ms / max(1, var(--lib-agent-count, 1) - 1))); }
 @media (prefers-reduced-motion: reduce) {
-  .lib-row > .lib-agents .lib-ag[data-agent], .lib-row > .lib-agents:hover .lib-ag[data-agent], .lib-row > .lib-agents:focus-within .lib-ag[data-agent] { transition-duration: .14s, .14s, .14s, .2s, .2s, 0s; transition-delay: 0s; }
+  .lib-row > .lib-agents .lib-ag[data-agent], .lib-row > .lib-agents:hover .lib-ag[data-agent], .lib-row > .lib-agents:focus-within .lib-ag[data-agent], .lib-row > .lib-agents .lib-ag[data-members], .lib-row > .lib-agents:hover .lib-ag[data-members], .lib-row > .lib-agents:focus-within .lib-ag[data-members] { transition-duration: .14s, .14s, .14s, .2s, .2s, 0s; transition-delay: 0s; }
 }
 .lib-row > .lib-agents .lib-ag .ic { width: 14px; height: 14px; }
 /* the ring in the card's colour that cuts each chip out of the one under
@@ -400,8 +413,12 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-rowacts { display: flex; gap: 2px; flex: none; opacity: 0; transition: opacity .14s; }
 .lib-row:hover .lib-rowacts, .lib-rowacts:focus-within { opacity: 1; }
 .lib-icon { width: 26px; height: 26px; padding: 0; display: inline-grid; place-items: center; }
-.lib-icon.busy svg { animation: lib-bob .8s var(--ease) infinite alternate; }
-@keyframes lib-bob { to { transform: translateY(-2px); } }
+.lib-rowacts.busy { opacity: 1; }
+.lib-icon.busy, .lib-icon.busy:disabled { opacity: 1; color: var(--muted); }
+.lib-icon.busy svg { animation: lib-spin .8s linear infinite; }
+@keyframes lib-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .lib-icon.busy svg { animation: lib-pulse 1.2s ease infinite alternate; } }
+@keyframes lib-pulse { to { opacity: .35; } }
 
 /* the skill finder */
 .lib-install { margin-bottom: 4px; }
@@ -409,6 +426,8 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-find input { flex: 1; min-width: 0; height: 28px; border: 0; outline: none; background: none; font-size: 13px; color: var(--fg); }
 .lib-find input::placeholder { color: var(--faint); }
 .lib-find .text.busy { color: var(--muted); }
+.lib-find .lib-findnote { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); }
+.lib-pick .lib-cmdfrom { -webkit-line-clamp: 1; }
 .lib-err { padding: 0 14px 10px 36px; font-size: 12px; color: var(--red); line-height: 1.45; overflow-wrap: anywhere; }
 .lib-probe { border-top: 1px solid var(--line-2); padding: 8px 8px 8px; display: flex; flex-direction: column; gap: 6px; animation: content-in .22s var(--ease); }
 .lib-probehead { display: flex; align-items: center; gap: 6px; padding: 0 4px; }
@@ -463,6 +482,8 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-pair input:first-child { flex: .8; }
 .lib-x { width: 24px; height: 24px; padding: 0; display: inline-grid; place-items: center; flex: none; }
 .lib-addpair { padding-left: 0; }
+.lib-cmdbox { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; }
+.lib-cmdbox .lib-cmd { width: 100%; }
 .lib-addpair:hover { background: none; }
 .lib-editor .lib-picks { grid-column: 1 / -1; max-height: 320px; }
 .lib-editor .lib-keep { grid-column: 1 / -1; margin: 0 -6px; }
@@ -575,7 +596,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .mk-desc.wait { background: linear-gradient(90deg, var(--pill) 25%, var(--pill-hover) 45%, var(--pill) 65%); background-size: 240% 100%; animation: skeleton-shift 1.4s ease-in-out infinite; border-radius: 5px; min-height: 0; height: 8px; margin: 6px 20% 10px 0; }
 .mk-foot { display: flex; align-items: center; gap: 8px; min-height: 26px; margin-top: auto; }
 .mk-id { min-width: 0; font: var(--code-style, normal) var(--code-weight, 400) 11px var(--code-font, var(--code)); font-stretch: var(--code-stretch, 100%); color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mk-installs { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.mk-installs { flex: none; display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .mk-add { flex: none; height: 26px; }
 .mk-add.busy { color: var(--muted); }
 .mk-have { flex: none; display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 4px; font-size: 12px; color: var(--muted); }
@@ -650,6 +671,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-tooltxt { flex: 1; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .lib-tool .lib-switch { width: 28px; height: 16px; padding: 0; border: 0; cursor: pointer; }
 .lib-tool .lib-switch i { width: 12px; height: 12px; }
+.lib-tool .lib-switch::before { line-height: 16px; }
 .lib-tool .lib-switch.on i { transform: translateX(12px); }
 .lib-tool.off .lib-tooltxt { opacity: .5; }
 .lib-tool.off .lib-toolname { text-decoration: line-through; }
@@ -665,6 +687,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-tag.lib-dot::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--muted); }
 .lib-projopts { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 12px 8px 49px; border-top: 1px solid var(--line-2); background: var(--card-2); }
 .lib-projopts .note { font-size: 11px; color: var(--faint); line-height: 1.45; min-width: 0; flex: 1 1 220px; }
+.lib-projopts .lib-projpick { height: 26px; color: var(--fg); }
 .lib-projcopy { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-2); cursor: default; }
 .lib-project .lib-projskill { border-top: 1px solid var(--line-2); }
 .lib-projfoot { margin: 0; padding: 8px 12px 10px 49px; border-top: 1px solid var(--line-2); }
@@ -781,11 +804,26 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-subagent > .who { flex-basis: 240px; }
 .lib-subagent .lib-subagentdesc { font-size: 12px; line-height: 1.45; color: var(--fg); white-space: normal; overflow-wrap: anywhere; margin-top: 1px; }
 .lib-subagent .lib-subagentuses { white-space: normal; overflow-wrap: anywhere; }
+.lib-plugin > .who { flex-basis: 240px; }
+.lib-plugin.off .name, .lib-plugin.off .lib-subagentdesc { opacity: .55; }
+.lib-plugin .lib-plparts, .lib-plpick .lib-plparts { white-space: normal; overflow-wrap: anywhere; }
+.lib-pldetail > :is(p, details, .hint), .lib-pldetail .ebody > :is(p, details, .hint) { grid-column: 1 / -1; margin: 0; }
+.lib-pldetail p { font-size: 12.5px; line-height: 1.5; }
+.lib-pldetail .lib-plgroup > summary { cursor: pointer; font-size: 12.5px; color: var(--fg-2); }
+.lib-pldetail .lib-plgroup .lib-plnames { margin-top: 4px; font-size: 12px; }
+.lib-pldetail .lib-plnames, .lib-pldetail .lib-plsource { white-space: normal; overflow-wrap: anywhere; }
 .lib-subagentedit .lib-menu { max-width: 100%; height: 28px; color: var(--fg); }
 .lib-subagentedit .lib-menu > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lib-subagentedit .lib-subagentdescin, .lib-subagentedit .lib-subagentprompt { width: 100%; box-sizing: border-box; resize: none; font: inherit; font-size: 12.5px; line-height: 1.45; }
 .lib-subagentedit .lib-subagentprompt { max-height: 40vh; overflow-y: auto; }
 .lib-subagentedit .hint:empty { display: none; }
+/* a slash command's row: its /name in mono, its description under it;
+   its editor's prompt a box that grows */
+.lib-command > .who { flex-basis: 240px; }
+.lib-command .lib-commanddesc { font-size: 12px; line-height: 1.45; color: var(--fg); white-space: normal; overflow-wrap: anywhere; margin-top: 1px; }
+.lib-commandedit .lib-commanddescin, .lib-commandedit .lib-commandprompt { width: 100%; box-sizing: border-box; resize: none; font: inherit; font-size: 12.5px; line-height: 1.45; }
+.lib-commandedit .lib-commandprompt { max-height: 40vh; overflow-y: auto; }
+.lib-commandedit .hint:empty { display: none; }
 
 /* a chip whose agent has the item whatever is ticked (it reads
    ~/.agents/skills itself, #595): lit, as it has it, with a lock on its
@@ -855,3 +893,80 @@ body.window .lib-list .lib-row { --lib-indent: 38px; }
 .lib-foundmore span { display: inline-flex; }
 .lib-foundmore.open .chev { transform: rotate(180deg); }
 @media (hover: hover) and (pointer: fine) { .lib-foundmore:hover { color: var(--fg); background: var(--card-2); } }
+/* Pi's extensions: a heading per Pi, its path beside it */
+.lib-pi-head > .lib-path { flex: 0 1 auto; min-width: 0; }
+.lib-pi-row > .lib-pi-copy { flex: none; }
+.lib-pi + .lib-pi-head { margin-top: 18px; }
+
+/* Memory: the digest switch, a search with its filters, and the memories */
+.lib-memcard { margin-bottom: 12px; }
+.lib-membar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 2px 8px; }
+.lib-membar .lib-memq { flex: 1 1 180px; min-width: 0; max-width: 320px; height: 28px; }
+.lib-membar .lib-menu { height: 28px; max-width: 220px; color: var(--fg); }
+.lib-membar .lib-menu > span:first-child, .lib-memline .lib-menu > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-mems .lib-mem > .who .name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-weight: 400; }
+.lib-mems .lib-mem.open > .who .name { -webkit-line-clamp: unset; }
+.lib-mems .lib-mem > .who .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-memdetail { padding-left: 12px; }
+/* Select: a box on each memory, the ones picked tinted, the bar under the list */
+.lib-mems.picking .lib-mem > .chev { display: none; }
+.lib-mems .lib-mem.picked { background: var(--accent-soft); }
+/* a row moved to with ↑ ↓ stops above the bar, not under it */
+.lib-mems.picking .lib-mem { scroll-margin-bottom: 96px; }
+.lib-mems .lib-mem > .lib-pickbox { margin: 0; flex: none; }
+.lib-membar .lib-memselect { height: 28px; }
+.lib-mempickbar .lib-memdel.danger { color: var(--red); }
+.lib-memline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.lib-memline .lib-menu { height: 28px; max-width: 220px; color: var(--fg); }
+.lib-memline .lib-memtags { flex: 1 1 160px; min-width: 0; height: 28px; }
+.lib-memdetail .lib-memwhy { height: 28px; }
+input.lib-memq, input.lib-memtags, input.lib-memwhy { padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--card); color: var(--fg); font-size: 12.5px; outline: none; box-sizing: border-box; transition: border-color .12s, box-shadow .12s; }
+input.lib-memq:focus, input.lib-memtags:focus, input.lib-memwhy:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.lib-follow .link { font-size: inherit; padding: 0; margin-left: 2px; }
+
+/* a server's accounts, one in use (Elorynth on X) */
+.lib-accts { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.lib-acct { display: flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); transition: background-color .12s ease, border-color .12s ease; }
+.lib-acct.on { border-color: var(--accent); background: var(--accent-soft); }
+.lib-acct-pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 0; background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.lib-acct.on .lib-acct-pick { cursor: default; }
+.lib-acct-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-acct-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--faint); box-sizing: border-box; transition: background-color .12s ease, border-color .12s ease; }
+.lib-acct.on .lib-acct-dot { background: var(--accent); border-color: var(--accent); }
+.lib-acct .lib-x { margin-right: 4px; }
+.lib-acct-new { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.lib-acct-new input { width: 11em; max-width: 100%; }
+.lib-acct-form { display: flex; flex-direction: column; gap: 6px; }
+.lib-acct-form > input { max-width: 16em; }
+.lib-acct-act { display: flex; gap: 8px; }
+@media (hover: hover) and (pointer: fine) { .lib-acct:not(.on):hover { background: var(--hover, var(--accent-soft)); } }
+@media (prefers-reduced-motion: reduce) { .lib-acct, .lib-acct-dot { transition: none; } }
+
+/* an agent's profiles as one chip: how many have the item, in the corner */
+.lib-ag.profiles .cnt { position: absolute; right: -3px; bottom: -3px; min-width: 12px; height: 12px; padding: 0 3px; border-radius: 6px; box-sizing: border-box; background: var(--card); border: 1px solid var(--line); color: var(--fg-2); font-size: 9px; line-height: 10px; text-align: center; font-variant-numeric: tabular-nums; pointer-events: none; }
+.lib-ag.profiles .cnt:empty { display: none; }
+.lib-ag.profiles.open { background: var(--pill); }
+
+/* billion-context.json's settings: the nudge step a small number field in
+   the row, its philosophy under an Advanced disclosure drawn as the
+   editors' (.editor .more) is: a chevron that turns, the label beside it */
+.lib-bili-set .lib-bili-growth { width: 96px; font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; text-align: right; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); }
+.lib-bili-set .lib-bili-growth:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.lib-bili-set .lib-bili-model { max-width: 40%; }
+.lib-bili-set .lib-bili-model > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-bili-more { margin-top: 10px; }
+.lib-bili-more > summary { font-size: 12px; line-height: 18px; color: var(--fg-2); list-style: none; display: inline-flex; align-items: center; gap: 5px; padding: 3px 0; border-radius: 4px; cursor: pointer; transition: color .12s ease; }
+.lib-bili-more > summary::-webkit-details-marker { display: none; }
+.lib-bili-more > summary::before { content: ""; flex: none; width: 10px; height: 10px; background: var(--muted); transition: transform .2s cubic-bezier(.23, 1, .32, 1), background-color .12s ease;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M3.6 1.6 7 5 3.6 8.4' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M3.6 1.6 7 5 3.6 8.4' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat; }
+.lib-bili-more[open] > summary::before { transform: rotate(90deg); }
+.lib-bili-more > summary:hover { color: var(--fg); }
+.lib-bili-more > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .lib-bili-more > summary, .lib-bili-more > summary::before { transition: none; } }
+.lib-bili-more > .lib-bili-marks { margin: 8px 0 0 15px; }
+.lib-bili-phil { display: grid; gap: 6px; padding: 8px 0 0 15px; }
+.lib-bili-phil > .name { font-size: 12.5px; color: var(--fg-2); }
+.lib-bili-phil .lib-acts { justify-content: flex-end; }
+/* the servers turned off, folded below the ones on, as Providers' */
+#view-library .lib-offhead .fold:disabled { cursor: default; opacity: 1; }

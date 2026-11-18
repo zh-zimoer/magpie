@@ -10,13 +10,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -390,7 +390,14 @@ func previewEnv(home, tmp string) []string {
 	// The test binary recognizes this marker and keeps the fixture HOME
 	// instead of creating a second isolated home. Production binaries ignore
 	// the variable.
-	return append(out, "HOME="+tmp, "USERPROFILE="+tmp, "TMPDIR="+tmp, "MAGPIE_TEST_SANDBOX="+tmp)
+	//
+	// No sign-in is read: building the providers there would read the
+	// Claude sign-in from the keychain, found through HOME on a Mac, and
+	// the copy's home has none, so macOS asked the user "Keychain Not
+	// Found" at each preview (jasonz3g on X). It would run agents' CLIs
+	// under the copy's home too. The files the dry run changes are the
+	// agent's, and no account changes them.
+	return append(out, "HOME="+tmp, "USERPROFILE="+tmp, "TMPDIR="+tmp, "MAGPIE_TEST_SANDBOX="+tmp, "MAGPIE_NO_ACCOUNTS=1")
 }
 
 // diffLines is the lines that differ between two texts, in the order of the
@@ -560,7 +567,7 @@ func splitLines(s string) []string {
 
 // lineKey is what a line sets: TOML's and .env's key before =, JSON's and
 // YAML's before :, "" for a line that sets nothing.
-var keyRe = regexp.MustCompile(`^\s*(?:export\s+)?"?([A-Za-z0-9_.\-]+)"?\s*[:=]`)
+var keyRe = lazyre.New(`^\s*(?:export\s+)?"?([A-Za-z0-9_.\-]+)"?\s*[:=]`)
 
 func lineKey(l string) string {
 	if m := keyRe.FindStringSubmatch(l); m != nil {
@@ -574,7 +581,7 @@ func lineKey(l string) string {
 
 func indent(l string) string { return l[:len(l)-len(strings.TrimLeft(l, " \t"))] }
 
-var secretKey = regexp.MustCompile(`(?i)(key|token|secret|password|auth)`)
+var secretKey = lazyre.New(`(?i)(key|token|secret|password|auth)`)
 
 // mask hides the value of a line whose key reads as a secret's; magpie's
 // own token, which is no secret, stays.

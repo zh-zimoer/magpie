@@ -46,12 +46,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -143,15 +143,19 @@ func (s *Server) nativeArk(w http.ResponseWriter, r *http.Request, p provider.Pr
 			fail(http.StatusForbidden, msg)
 			return
 		}
+		// as nativeAny's: one the user set to go unmasked goes as written
 		var hits maskHits
-		if err := maskStrings(r.Context(), obj, &hits); err != nil { // fails closed
-			fail(maskStatus(err), err.Error())
-			return
+		if !p.SkipsRedaction() {
+			if err := maskStrings(r.Context(), obj, &hits); err != nil { // fails closed
+				fail(maskStatus(err), err.Error())
+				return
+			}
+			if hits.n > 0 {
+				b, _ := json.Marshal(obj)
+				noteMasked(r, "native", hits, string(b), 0, p.ID, model)
+			}
 		}
-		if hits.n > 0 {
-			b, _ := json.Marshal(obj)
-			noteMasked(r, "native", hits, string(b), 0, p.ID, model)
-		}
+		noteChecked(r, p.SkipsRedaction(), hits)
 		body, _ = json.Marshal(obj)
 	}
 	w, done := restoring(w)
@@ -237,7 +241,7 @@ func nativeProto(p provider.Provider) provider.Protocol {
 
 // schemeLike is a first segment that reads as a URL's scheme ("http:",
 // "javascript:x").
-var schemeLike = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
+var schemeLike = lazyre.New(`^[A-Za-z][A-Za-z0-9+.-]*:`)
 
 // nativeTarget is raw, the path after the provider as the caller escaped
 // it, at base's host: scheme and host from base, nothing of base's path.
@@ -310,9 +314,12 @@ func nativeHeaderDropped(k string) bool {
 // proxyIdentity says k is what a proxy or tunnel in front of magpie says
 // of the caller: its address (every forwardHeaders entry, X-Forwarded-*,
 // Cloudflare's Cf-*) or who it is (Tailscale Serve's Tailscale-User-Login,
-// the user's email, -Name and -Profile-Pic). It is for magpie to judge a
-// request by (proxied), never for a vendor or a server magpie passes the
-// request on to.
+// the user's email, -Name and -Profile-Pic; a LazyCat box's X-HC-*, the
+// box account a signed-in browser or app is, its role, its device and
+// when it signed in, which the box's ingress adds to every request it
+// passes an app, the gateway's client routes too). It is for magpie to
+// judge a request by (proxied), never for a vendor or a server magpie
+// passes the request on to.
 func proxyIdentity(k string) bool {
 	k = http.CanonicalHeaderKey(k)
 	if slices.ContainsFunc(forwardHeaders, func(h string) bool { return http.CanonicalHeaderKey(h) == k }) {
@@ -322,7 +329,7 @@ func proxyIdentity(k string) bool {
 	case "Forwarded", "Via", "X-Real-Ip", "True-Client-Ip", "X-Client-Ip", "X-Original-Forwarded-For":
 		return true
 	}
-	return strings.HasPrefix(k, "X-Forwarded-") || strings.HasPrefix(k, "Cf-") || strings.HasPrefix(k, "Tailscale-")
+	return strings.HasPrefix(k, "X-Forwarded-") || strings.HasPrefix(k, "Cf-") || strings.HasPrefix(k, "Tailscale-") || strings.HasPrefix(k, "X-Hc-")
 }
 
 // nativeAnswerDropped are the vendor's answer headers that don't come
@@ -390,7 +397,8 @@ func (s *Server) nativeAny(w http.ResponseWriter, r *http.Request, p provider.Pr
 			fail(http.StatusForbidden, msg)
 			return
 		}
-		if redactionWanted() && !p.SkipsRedaction() {
+		var hits maskHits
+		if redactionWantedFor(r.Context()) && !p.SkipsRedaction() {
 			var v any
 			dec := json.NewDecoder(bytes.NewReader(body))
 			dec.UseNumber() // a seed or an id goes as it came
@@ -400,7 +408,6 @@ func (s *Server) nativeAny(w http.ResponseWriter, r *http.Request, p provider.Pr
 			}
 			// the value inside a list, so a lone string is masked as well
 			box := []any{v}
-			var hits maskHits
 			if err := maskStrings(r.Context(), box, &hits); err != nil { // fails closed
 				fail(maskStatus(err), err.Error())
 				return
@@ -418,6 +425,7 @@ func (s *Server) nativeAny(w http.ResponseWriter, r *http.Request, p provider.Pr
 				noteMasked(r, "native", hits, string(body), 0, p.ID, call.Model)
 			}
 		}
+		noteChecked(r, p.SkipsRedaction(), hits)
 	}
 	if masked {
 		var done func()
@@ -489,8 +497,8 @@ func (s *Server) nativeAny(w http.ResponseWriter, r *http.Request, p provider.Pr
 	}
 	call.Usage = u
 	s.record(*call)
-	appendUsage(r, usage.Record{Operation: "native", Time: start, Agent: call.Agent, Via: call.Via, Provider: p.ID, Host: p.Where(), Model: call.Model, Requested: call.Model, Served: u.Served, Upstream: u.Upstream,
+	appendAdvised(r, usage.Record{Operation: "native", Time: start, Agent: call.Agent, Via: call.Via, Provider: p.ID, Host: p.Where(), Model: call.Model, Requested: call.Model, Served: u.Served, Upstream: u.Upstream,
 		ProviderKeyID: provider.KeyID(p.Key), ProviderKeyName: p.KeyName,
 		Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, CacheWrite1h: u.CacheWrite1h, Reasoning: u.Reasoning,
-		Millis: call.Millis, Status: call.Status, Session: sessionOf(r.Header)})
+		Millis: call.Millis, Status: call.Status, Session: sessionOf(r.Header)}, u)
 }

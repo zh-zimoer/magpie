@@ -58,7 +58,9 @@ func TestReasoningSpeedThroughGateway(t *testing.T) {
 	for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
 		t.Run(path, func(t *testing.T) {
 			fresh(t)
-			up := httptest.NewServer(&paced{events: events, gap: 150 * time.Millisecond})
+			// each thought a gap after the agent had the one before (#5948)
+			rec := newHearing(0, "first thought", "second thought", "third thought")
+			up := httptest.NewServer(&paced{events: events, gap: 150 * time.Millisecond, heard: rec.heard})
 			t.Cleanup(up.Close)
 			if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Chat: up.URL + "/v1", Key: "k", Models: []string{"m1"}}); err != nil {
 				t.Fatal(err)
@@ -68,7 +70,6 @@ func TestReasoningSpeedThroughGateway(t *testing.T) {
 				body = `{"model":"fake/m1","stream":true,"input":"hi"}`
 			}
 			s := New()
-			rec := httptest.NewRecorder()
 			s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(body)))
 			u := lastUsage(t)
 			r := lastRoute(s)
@@ -94,7 +95,7 @@ func TestReasoningSpeedThroughGateway(t *testing.T) {
 // stood in for by holding the sticks' save.
 func TestSpeedEndsWithTheReply(t *testing.T) {
 	events := []string{
-		`data: {"choices":[{"delta":{"reasoning_content":"first thought"}}]}`,
+		`~data: {"choices":[{"delta":{"reasoning_content":"first thought"}}]}`,
 		`~data: {"choices":[{"delta":{"reasoning_content":"second thought"}}]}`,
 		`~data: {"choices":[{"delta":{"reasoning_content":"third thought"}}]}`,
 		`~data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"check","arguments":"{}"}}]}}]}`,
@@ -103,13 +104,14 @@ func TestSpeedEndsWithTheReply(t *testing.T) {
 	}
 	const held = 2 * time.Second
 	fresh(t)
-	up := httptest.NewServer(&paced{events: events, gap: 150 * time.Millisecond})
+	// each thought a gap after the agent had the one before (#5948)
+	rec := newHearing(0, "first thought", "second thought", "third thought")
+	up := httptest.NewServer(&paced{events: events, gap: 150 * time.Millisecond, heard: rec.heard})
 	t.Cleanup(up.Close)
 	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Chat: up.URL + "/v1", Key: "k", Models: []string{"m1"}}); err != nil {
 		t.Fatal(err)
 	}
 	s := New()
-	rec := httptest.NewRecorder()
 	sticksSaving.Lock()
 	let := time.AfterFunc(held, sticksSaving.Unlock)
 	t.Cleanup(func() {
@@ -364,14 +366,22 @@ func TestLiveVisibleReasoningFixture(t *testing.T) {
 	if err = json.Unmarshal(b, &sample); err != nil {
 		t.Fatal(err)
 	}
+	// see reads the wall clock after start is set, so the first event lands
+	// at its at_ms plus however long that took: a millisecond more on a busy
+	// machine (6790/6789 on macOS CI), so the bound is what really passed.
 	f := firstToken{}
-	for _, e := range sample.Events {
+	var slack int64
+	for i, e := range sample.Events {
 		delta, _ := json.Marshal(e.Delta)
-		f.start = time.Now().Add(-time.Duration(e.At) * time.Millisecond)
+		set := time.Now()
+		f.start = set.Add(-time.Duration(e.At) * time.Millisecond)
 		f.see([]byte(`data: {"choices":[{"delta":{"reasoning_content":` + string(delta) + `}}]}` + "\n\n"))
+		if i == 0 {
+			slack = time.Since(set).Milliseconds() + 1
+		}
 	}
-	if f.reasoningMs(provider.Chat) != sample.Events[0].At {
-		t.Fatalf("live reasoning fixture lost its start: %d/%d", f.reasoningMs(provider.Chat), sample.Events[0].At)
+	if got, at := f.reasoningMs(provider.Chat), sample.Events[0].At; got < at || got > at+slack {
+		t.Fatalf("live reasoning fixture lost its start: %d/%d (+%d ms passing)", got, at, slack)
 	}
 	// its 731 ms came after a 6.8 s wait, which tells no speed: under a
 	// second after a wait over four times longer reads as a reply let go
@@ -385,5 +395,57 @@ func TestLiveVisibleReasoningFixture(t *testing.T) {
 	n, ms := usage.DecodeOf(rec.Out, rec.Reasoning, rec.Ms-d, rec.TTFT-d, 0, rec.Flow, sample.First-d)
 	if n != 76 || ms != 731 {
 		t.Fatalf("live tool turn speed %d/%d; want 76/731", n, ms)
+	}
+}
+
+// A Codex turn that wrote a preamble, reasoned, then called a tool
+// (Archivemylife on X, gpt-6.1-sol at service_tier priority): counted from
+// the preamble, its window held the reasoning and its content read as one
+// burst at the end, so it told no speed. Its answer is counted from what
+// came after its last reasoning, the shell call's first bytes.
+func TestCodexPreambleThenReasoningTellsSpeed(t *testing.T) {
+	var sample struct {
+		Record struct {
+			Out       int   `json:"out"`
+			Reasoning int   `json:"reasoning"`
+			Ms        int64 `json:"ms"`
+		} `json:"record"`
+		Events []struct {
+			At   int64           `json:"at_ms"`
+			Data json.RawMessage `json:"data"`
+		} `json:"events"`
+	}
+	b, err := os.ReadFile("testdata/codex-preamble-reasoning-tool.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(b, &sample); err != nil {
+		t.Fatal(err)
+	}
+	f := firstToken{}
+	var called int64 // the shell call's start, as it came
+	for _, e := range sample.Events {
+		if called == 0 && strings.Contains(string(e.Data), `"type":"function_call"`) {
+			called = e.At
+		}
+		f.start = time.Now().Add(-time.Duration(e.At) * time.Millisecond)
+		f.see([]byte("data: " + string(e.Data) + "\n\n"))
+	}
+	rec := sample.Record
+	ttft, text := f.ms()
+	if !f.hidesReasoning(provider.Responses, rec.Reasoning) {
+		t.Fatal("the reasoning after the preamble was not seen")
+	}
+	if text < called || text > called+50 {
+		t.Fatalf("answer counted from %d ms; want the shell call's start, %d", text, called)
+	}
+	n, w := usage.DecodeOf(rec.Out, rec.Reasoning, rec.Ms, ttft, text, f.flowFor(rec.Reasoning))
+	if n != rec.Out-rec.Reasoning || w <= 0 {
+		t.Fatalf("no speed: %d/%d (ttft %d, text %d, flow %d)", n, w, ttft, text, f.flowFor(rec.Reasoning))
+	}
+	// 630 tokens in about 1.6 s: priority's pace, not the 30 tok/s the
+	// whole turn after the preamble would read
+	if s := float64(n) / (float64(w) / 1000); s < 200 || s > 600 {
+		t.Fatalf("speed %.0f tok/s", s)
 	}
 }

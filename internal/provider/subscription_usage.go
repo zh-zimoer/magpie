@@ -41,6 +41,11 @@ type QuotaWindow struct {
 	// "100% left". Claude's "Extra usage" row (claudeOveragesWindow) is
 	// the one Text window with Used 100: the account counts as spent.
 	Text bool `json:"text,omitempty"`
+	// Lane names a window of an allowance apart from the account's own
+	// ("images", ImageLane): its row is Text, and says only when it comes
+	// back, if known. Added as cards are handed out (WithImageLane), never
+	// cached.
+	Lane string `json:"lane,omitempty"`
 	// Amount of Limit is the window's own count in Unit, when the vendor
 	// counts it so (WorkBuddy's credits): Used is Amount as a share of
 	// Limit. The GUI says it as used or left, as it says the share (#659).
@@ -58,8 +63,16 @@ type QuotaWindow struct {
 	// (SuperMagic's points, #3950). Used is then no reading (0); the GUI
 	// says the figure left, and routing knows the account by it and puts
 	// the one with the most left first among a provider's accounts in the
-	// same unit (Allowance.Left). nil when not told.
+	// same unit (Allowance.Left). nil when not told. On an account with a
+	// usage cap, Amount of Limit and Used are what the wallet spent in the
+	// cap's period instead (wallet_spend.go, #5770), for the cap to hold.
 	Balance *float64 `json:"balance,omitempty"`
+	// Spent is, on a wallet's window (Balance), how much of it magpie saw
+	// go since SpentSince, the first reading of the period a cap counts it
+	// over: the window's own until its reset, else the local day
+	// (wallet_spend.go). nil when not counted.
+	Spent      *float64   `json:"spent,omitempty"`
+	SpentSince *time.Time `json:"spentSince,omitempty"`
 	// Family is the model family a per-model window belongs to (Antigravity's
 	// "Gemini 3.1 Pro (High)" is Gemini's), for the GUI to show one figure a
 	// family, the tightest; each window is still here, and routing reads
@@ -88,6 +101,11 @@ type QuotaWindow struct {
 	// (Allowance.OnCredits); kept
 	// with the reading, so one shown from before still says it.
 	Credits bool `json:"credits,omitempty"`
+	// Extra is set on a Claude account's "Usage credits" window
+	// (claudeExtraWindow): the extra usage Anthropic bills past the plan,
+	// set aside. A cap the user sets on it holds the account at 100% of a
+	// plan window once reached (Allowance.extraCapped), never outright.
+	Extra bool `json:"extra,omitempty"`
 	// Capped is set, for the GUI only (WithCapped), on a window an
 	// account's usage cap counts: neither Aside nor unlimited. One model's
 	// own counts for that model (CapHeld), so it is marked like the rest.
@@ -240,6 +258,11 @@ type SubscriptionQuota struct {
 	// From is the remote magpie a card is that one's (remote_quotas.go),
 	// by its name here; "" for this computer's own.
 	From string `json:"from,omitempty"`
+	// Via is the magpies (catalog.Self) a card told another magpie
+	// passed through, the one that read it first, this one last
+	// (CachedCards): the receiver leaves out a card that comes back to
+	// it (catalog.Loops). Only between magpies; nil here.
+	Via []string `json:"via,omitempty"`
 	// LastServedAt is when the account, plan or key last answered a
 	// request through this computer's gateway, nil when it hasn't in the
 	// last 30 days (served.go); set by Quotas, never cached.
@@ -260,6 +283,14 @@ type SubscriptionQuota struct {
 	// this computer (#1547, remote_key_limits.go): the limit that magpie
 	// holds the key to, beside the windows that show it.
 	GatewayKey *GatewayKeyLimit `json:"gatewayKey,omitempty"`
+	// Routing is, on a card told another magpie (RemoteCardsPath), what
+	// each window's json leaves out for routing (Span, Model, Aside), in
+	// the windows' order: that magpie weighs its Remote magpie by the card
+	// (RemoteAllowance, #6708). Set only as cards are told; nil elsewhere.
+	Routing []lastWindow `json:"routing,omitempty"`
+	// routable: a remote magpie's card whose windows have Routing laid
+	// back on them (keepRemoteCards), so routing may go by them
+	routable bool
 	// In-process read order, separate from the vendor's ReadAt and never
 	// persisted: restarting starts a new sequence.
 	readSeq uint64
@@ -395,7 +426,7 @@ func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
 		}
 		if q.Provider == "gemini" || q.Provider == "antigravity" {
 			if chosen == nil {
-				chosen = exposedIDs("gemini", "antigravity")
+				chosen = keptExposedIDs("gemini", "antigravity")
 			}
 			var base func(string) string
 			if q.Provider == "antigravity" {
@@ -413,6 +444,47 @@ func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
 		out = append(out, q)
 	}
 	return out
+}
+
+// keptExposed is exposedIDs for Gemini's and Antigravity's quotas, kept
+// while StampNow stays the same, and no longer than exposedFor. The tray
+// reads usage every few minutes, and building it each time loaded the
+// whole catalog (5.6 MB of a tray-only magpie's 12.8 MB live heap) before
+// catalog's loadIdle could let it go.
+var keptExposed struct {
+	sync.Mutex
+	ids   map[string]map[string]bool
+	key   string
+	stamp Stamp
+	at    time.Time
+}
+
+// exposedFor bounds how long keptExposed is trusted across what a Stamp
+// can't see: a model retired by its date, another app's account file.
+const exposedFor = 30 * time.Minute
+
+// exposedBuilds counts keptExposedIDs' builds, for a test.
+var exposedBuilds atomic.Int64
+
+// keptExposedIDs is exposedIDs(ids...), built again only after a change
+// or for other ids. What it gives is shared: read only.
+func keptExposedIDs(ids ...string) map[string]map[string]bool {
+	key := strings.Join(ids, "\x00")
+	now := StampNow()
+	keptExposed.Lock()
+	defer keptExposed.Unlock()
+	if keptExposed.ids != nil && keptExposed.key == key && keptExposed.stamp == now && time.Since(keptExposed.at) < exposedFor {
+		return keptExposed.ids
+	}
+	exposedBuilds.Add(1)
+	built := exposedIDs(ids...)
+	// a change while it was built: the next read builds it again
+	if StampNow() == now {
+		keptExposed.ids, keptExposed.key, keptExposed.stamp, keptExposed.at = built, key, now, time.Now()
+	} else {
+		keptExposed.ids = nil
+	}
+	return built
 }
 
 // exposedIDs is, for each provider of ids, the models magpie offers from
@@ -564,7 +636,13 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 			} else if ok {
 				forgetLoginReading(l.Login)
 			}
-			fetches = append(fetches, func() SubscriptionQuota { return loginReading(viaLogin(agent, l.User), l.Login).read })
+			fetches = append(fetches, func() SubscriptionQuota {
+				q := loginReading(viaLogin(agent, l.User), l.Login).read
+				if q.User == "" {
+					q.User = l.User // as perLogin names it
+				}
+				return q
+			})
 		}
 	}
 	fetches = append(fetches, pluginUsageFetches(via, hidden, placed)...)
@@ -652,12 +730,16 @@ func (e *accountStatusError) Error() string { return http.StatusText(e.status) }
 // a Team seat isn't the email alone `claude auth status` gives.
 func claudeSubscriptionUsage(ctx context.Context, user string) SubscriptionQuota {
 	q := SubscriptionQuota{Provider: "claude", Name: "Claude Code", Icon: "claude-color", Windows: []QuotaWindow{}}
-	if _, _, ok := claudeCredential(); !ok {
+	c, _, ok := claudeCredential()
+	if !ok {
 		q.Error = "Claude Code is signed out; run claude auth login"
 		return q
 	}
-	_, plan, _ := claudeIdentity()
-	q.Plan = plan
+	// named as the account is (claudeAccount): `claude auth status` says
+	// "max" for Max 20x too, which Claude sells as Ultra (shangyuan0818 on X)
+	_, statusPlan, _ := claudeIdentity()
+	acct, _ := claudeProfileAccount()
+	q.Plan = claudeLivePlan(c, statusPlan, acct)
 	var err error
 	q.Windows, err = claudeWindows(ctx, user, true)
 	if err != nil {
@@ -883,7 +965,12 @@ func claudeWindows(ctx context.Context, user string, active bool) ([]QuotaWindow
 	// limit since (claudeLimitHitAfter, #4443)
 	due := e.tried.IsZero() || claudeAsked.Load() != 0 && asked > e.asked ||
 		active && now.Sub(e.tried) >= claudeWaitOf(e, now) && (e.heard.After(e.tried) || claudeUsedSince(e.tried)) ||
-		active && claudeLimitHitAfter(e.tried)
+		active && claudeLimitHitAfter(e.tried) ||
+		// a first reading that failed (Claude Code not on a GUI's PATH, a
+		// network blink) is tried again after the wait, as nothing is kept
+		// to show and nobody need have used Claude Code since: a user who
+		// never routes Claude through magpie would see "not read" for good
+		active && e.ws == nil && e.err != nil && now.Sub(e.tried) >= e.wait
 	// a saved account the switch off a spent one has no reading of
 	// (spareRead): read once, and again only after a wait while its read
 	// keeps failing, never every look
@@ -1137,17 +1224,7 @@ func codexWindows(ctx context.Context, token, accountID string) (plan string, ou
 // or less) is none left, whatever has_credits says.
 func codexGoesOnCredits(u codexUsage) bool {
 	c := u.Credits
-	if c == nil {
-		return false
-	}
-	if c.Unlimited {
-		return true
-	}
-	if !c.Has {
-		return false
-	}
-	n, err := strconv.ParseFloat(strings.TrimSpace(c.Balance), 64)
-	return err != nil || n > 0
+	return c != nil && CodexGoesOnCredits(c.Has, c.Unlimited, c.Balance)
 }
 
 // codexUsage is what /wham/usage tells of a ChatGPT account.

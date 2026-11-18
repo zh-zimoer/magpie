@@ -68,7 +68,10 @@ const claudeHeard = time.Hour
 
 // NoteClaudeLimits keeps what Claude Code said of user's allowance as it
 // answered, in place of the windows of the same names last read, and has
-// routing weigh the account by it.
+// routing weigh the account by it. An answer tells only some windows (a
+// rate_limit_event often names five_hour alone): the others stand as last
+// read, after a restart as kept on disk (quotas.json), so the week isn't
+// lost to an answer that didn't name it (ifccod7391564 on X).
 func NoteClaudeLimits(user string, ls []ClaudeLimit) {
 	var heard []QuotaWindow
 	for _, l := range ls {
@@ -93,14 +96,19 @@ func NoteClaudeLimits(user string, ls []ClaudeLimit) {
 		return
 	}
 	key := strings.ToLower(user)
+	onDisk := keptClaudeWindows(key) // read before claudeUsage is held: lastQuotas has its own lock
 	c := &claudeUsage
 	c.Lock()
 	if c.m == nil {
 		c.m = map[string]claudeUsageEntry{}
 	}
 	e := c.m[key]
+	kept := e.ws
+	if len(kept) == 0 {
+		kept = onDisk
+	}
 	ws := []QuotaWindow{}
-	for _, w := range e.ws {
+	for _, w := range kept {
 		if !slices.ContainsFunc(heard, func(h QuotaWindow) bool { return h.Name == w.Name }) {
 			ws = append(ws, w)
 		}
@@ -139,4 +147,41 @@ func KeptClaudeLimits(user string) []ClaudeLimit {
 		}
 	}
 	return out
+}
+
+// keptClaudeWindows are the windows of Claude account key (lower case)
+// kept on disk (quotas.json) that haven't renewed since: what a cold start
+// knows of it before /usage or an answer tells it again.
+func keptClaudeWindows(key string) []QuotaWindow {
+	q, ok := lastReading("claude/" + key)
+	if !ok {
+		return nil
+	}
+	var out []QuotaWindow
+	for _, w := range q.Windows {
+		if w.ResetsAt != nil { // renewed since (elapsed) or never said: unknown now
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// ClaudeAllowanceForTest is the allowance routing weighs for limits as
+// Claude Code told them, for the gateway's tests.
+func ClaudeAllowanceForTest(ls []ClaudeLimit, now time.Time) Allowance {
+	var ws []QuotaWindow
+	for _, l := range ls {
+		for _, k := range claudeKinds {
+			if k.kind != l.Kind {
+				continue
+			}
+			w := QuotaWindow{Name: k.name, Used: l.Used * 100, Span: k.span, Model: k.model}
+			if l.ResetsAt > 0 {
+				t := time.Unix(l.ResetsAt, 0)
+				w.ResetsAt = &t
+			}
+			ws = append(ws, w)
+		}
+	}
+	return allowanceOf(ws, now)
 }

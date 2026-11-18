@@ -5,8 +5,10 @@
 // The build comes from where Anthropic's installer (claude.ai/install.sh)
 // takes it: the release's manifest.json names each platform's SHA-256 and
 // size, and the binary is checked against both before it is kept. It is
-// kept in magpie's cache folder, not on PATH, so it stands in for no agent:
-// it is only what the bridge and the sign-in run. While magpie serves, it
+// kept in magpie's cache folder, not on PATH: it is what the bridge, the
+// sign-in and `magpie claude` run, and the Agents page doesn't take
+// ~/.claude for an uninstall's leftover while it is here (agent's
+// cliHeld). While magpie serves, it
 // keeps that download at the newest release (KeepCurrent), as Claude
 // Code's own updater would, which magpie's runs turn off.
 package claudecode
@@ -29,9 +31,9 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/libc"
 	"github.com/yetone/magpie/internal/netproxy"
-	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/stall"
 )
 
@@ -50,7 +52,7 @@ func exeName(goos string) string {
 	return "claude"
 }
 
-var versionRe = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
+var versionRe = lazyre.New(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
 
 // Downloaded is the Claude Code magpie downloaded and its version, or ""
 // when there is none: the newest of Root's versions that has the binary.
@@ -89,10 +91,10 @@ func newer(a, b string) bool {
 }
 
 // Find is the Claude Code to run on this machine: the user's own (on PATH
-// or where its installers put it, proc.FindTool), else the one magpie
-// downloaded; "" when there is neither.
+// or where its installers put it, the newest of them: Own), else the one
+// magpie downloaded; "" when there is neither.
 func Find() string {
-	if p := proc.FindTool("claude"); p != "" {
+	if p := Own(); p != "" {
 		return p
 	}
 	p, _ := Downloaded()

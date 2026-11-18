@@ -39,6 +39,7 @@ var wslMore = []struct {
 	{"codebuddy", ".codebuddy/models.json", "/v1/chat/completions"},
 	{"cline", ".cline/data/settings/providers.json", "/v1"},
 	{"atomcode", ".atomcode/config.toml", "/v1"},
+	{"open-code-review", ".opencodereview/config.json", "/v1"},
 	{"snow", ".snow/profiles/magpie.json", "/v1"},
 	{"goose", ".config/goose/custom_providers/magpie.json", "/v1"},
 	{"mothx", ".mothx/settings.json", "/v1"},
@@ -82,13 +83,13 @@ func moveHostDirs(t *testing.T) string {
 func TestWSLProbeFindsMoreAgents(t *testing.T) {
 	for _, c := range wslMore {
 		k := wslKindOf(c.id)
-		if k.dir != "" && !strings.Contains(wslProbeScript, `[ -d "$HOME/`+k.dir+`" ] && echo dir:`+k.dir+`; `) {
+		if k.dir != "" && !strings.Contains(wslProbeScript(), `[ -d "$HOME/`+k.dir+`" ] && echo dir:`+k.dir+`; `) {
 			t.Errorf("%s: probe lacks its folder %s", c.id, k.dir)
 		}
 		if k.dir != "" && !strings.HasPrefix(c.file, k.dir+"/") {
 			t.Errorf("%s: its file %s isn't under %s", c.id, c.file, k.dir)
 		}
-		if k.bin != "" && !strings.Contains(wslProbeScript, `p=$(wslcmd `+k.bin+`) `) {
+		if k.bin != "" && !strings.Contains(wslProbeScript(), `p=$(wslcmd `+k.bin+`) `) {
 			t.Errorf("%s: probe lacks its command %s", c.id, k.bin)
 		}
 		if p, _, _ := wslFinds(k); k.dir != "" || k.version {
@@ -103,7 +104,7 @@ func TestWSLProbeFindsMoreAgents(t *testing.T) {
 		}
 	}
 	for _, bin := range []string{"fx", "grok", "goose"} {
-		if strings.Contains(wslProbeScript, `wslcmd `+bin+`)`) {
+		if strings.Contains(wslProbeScript(), `wslcmd `+bin+`)`) {
 			t.Errorf("probe takes any %s command for the agent", bin)
 		}
 	}
@@ -372,7 +373,7 @@ func TestWSLDshProfiles(t *testing.T) {
 func TestWSLGemini(t *testing.T) {
 	home := syncHome(t)
 	k := wslKindOf("gemini")
-	if strings.Contains(wslProbeScript, `"$HOME/" ]`) {
+	if strings.Contains(wslProbeScript(), `"$HOME/" ]`) {
 		t.Fatal("the probe asks after $HOME itself")
 	}
 	if d := parseProbe("U", "home:/home/me\ndir:.gemini\n"); d != nil && k.found(*d) {

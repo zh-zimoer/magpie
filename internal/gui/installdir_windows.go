@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"log"
+	"os"
 	"path/filepath"
 	"runtime"
 	"syscall"
@@ -19,10 +20,28 @@ import (
 )
 
 // askInstallFolder has update.Settle ask where to install, in the
-// reader's language.
+// reader's language, when someone is there to answer. The question comes
+// before anything else starts, the gateway included: Install opens the
+// installed copy in this one's place. So a start no one can answer (a
+// CI runner, a service, a start over SSH) is never asked, or it would
+// wait on a dialog no one sees with no gateway behind it: v0.1.4160 to
+// v0.1.4166's release check started dist\magpie-windows-amd64.exe, which
+// 14807bcf2 made a download to ask about, and the gateway never came
+// up. Unasked, a copy kept outside Downloads runs where it is and
+// nothing is recorded for it; one in Downloads installs as it did
+// before there was a question.
 func askInstallFolder() {
+	if why := unanswerable(os.Getenv("CI"), visibleDesktop()); why != "" {
+		update.AskFolder = nil
+		log.Println("install: not asking where to install:", why)
+		return
+	}
 	update.AskFolder = func(suggest string, check func(string) error) string {
-		w := installWordsFor(trayLang(settings.Load().Lang, systemLang))
+		w := installWordsFor(trayLang(settings.Shared().Lang, systemLang))
+		exe, err := update.Executable()
+		if err != nil {
+			exe = ""
+		}
 		var out string
 		done := make(chan struct{})
 		// COM and the dialogs on a thread of their own, which ends with
@@ -30,7 +49,7 @@ func askInstallFolder() {
 		go func() {
 			runtime.LockOSThread()
 			defer close(done)
-			out = installDialog(w, suggest, check)
+			out = installDialog(w, suggest, w.footer(exe), check)
 		}()
 		<-done
 		return out
@@ -43,12 +62,12 @@ const (
 )
 
 // installDialog asks until the user installs in a folder check accepts,
-// or cancels (""). With no dialog to be had, dir is taken, as before
-// there was a choice.
-func installDialog(w installWords, dir string, check func(string) error) string {
+// or cancels (""), with footer under it all. With no dialog to be had,
+// dir is taken, as before there was a choice.
+func installDialog(w installWords, dir, footer string, check func(string) error) string {
 	note := ""
 	for {
-		btn, err := taskDialog(w, dir, note)
+		btn, err := taskDialog(w, dir, note, footer)
 		if err != nil {
 			log.Println("install: the folder dialog:", err)
 			return dir
@@ -78,7 +97,28 @@ func installDialog(w installWords, dir string, check func(string) error) string 
 	}
 }
 
+// visibleDesktop says whether this process's window station is one a
+// person sees (WSF_VISIBLE): not a service's, nor an SSH session's. True
+// when it can't be told, so the question is asked as before.
+func visibleDesktop() bool {
+	ws, _, _ := procGetWinStation.Call()
+	if ws == 0 {
+		return true
+	}
+	// USEROBJECTFLAGS: fInherit, fReserved (BOOLs), dwFlags
+	var flags struct{ inherit, reserved, flags uint32 }
+	var n uint32
+	const uoiFlags, wsfVisible = 1, 1
+	ok, _, _ := procGetUserObjInfo.Call(ws, uoiFlags, uintptr(unsafe.Pointer(&flags)), unsafe.Sizeof(flags), uintptr(unsafe.Pointer(&n)))
+	if ok == 0 {
+		return true
+	}
+	return flags.flags&wsfVisible != 0
+}
+
 var (
+	procGetWinStation  = windows.NewLazySystemDLL("user32.dll").NewProc("GetProcessWindowStation")
+	procGetUserObjInfo = windows.NewLazySystemDLL("user32.dll").NewProc("GetUserObjectInformationW")
 	comctl32           = windows.NewLazySystemDLL("comctl32.dll")
 	procTaskDialogIndi = comctl32.NewProc("TaskDialogIndirect")
 	procSHCreateItem   = windows.NewLazySystemDLL("shell32.dll").NewProc("SHCreateItemFromParsingName")
@@ -86,9 +126,10 @@ var (
 
 // taskDialog shows Windows' task dialog (comctl32 6, which the exe's
 // manifest asks for): the folder under the question, Install, Change…
-// and Cancel, and note, a refusal, with a warning icon above. It answers
-// the button pressed.
-func taskDialog(w installWords, dir, note string) (int, error) {
+// and Cancel, and note, a refusal, with a warning icon above; footer,
+// when there is one, in the dialog's footer. It answers the button
+// pressed.
+func taskDialog(w installWords, dir, note, footer string) (int, error) {
 	if err := procTaskDialogIndi.Find(); err != nil {
 		return 0, err
 	}
@@ -137,6 +178,9 @@ func taskDialog(w installWords, dir, note string) (int, error) {
 		le.PutUint32(cfg[60:], 2)
 		le.PutUint64(cfg[64:], uint64(uintptr(unsafe.Pointer(&buttons[0]))))
 		le.PutUint32(cfg[72:], idInstall)
+		if footer != "" {
+			le.PutUint64(cfg[132:], uint64(str(footer))) // pszFooter
+		}
 		var pressed int32
 		hr, _, _ := procTaskDialogIndi.Call(uintptr(unsafe.Pointer(&cfg[0])), uintptr(unsafe.Pointer(&pressed)), 0, 0)
 		runtime.KeepAlive(cfg)

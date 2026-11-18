@@ -17,7 +17,6 @@ package gateway
 // isn't asked to go on (prefill.go).
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -56,6 +55,13 @@ func emptyRetries(w http.ResponseWriter, ctx context.Context) int {
 	return streamRetries
 }
 
+// emptyAccounts is how many accounts of one model may answer a request
+// with a reply that said nothing before the rest of its accounts aren't
+// asked: the same conversation ends empty on whichever account it is sent
+// to, and each ask took minutes on a long one (vhjjkkhg on X: 8 to 9 tries
+// over 10+ minutes). The others of its group, and other providers, are.
+const emptyAccounts = 2
+
 // loopReasks is how many times a reply whose reasoning was stuck in a
 // loop (loopGuard) before it said anything is asked again in place, rather
 // than ended with the loop's error.
@@ -78,6 +84,43 @@ var errStreamCut = errors.New("stream cut mid-reply")
 // and be whole, so Chat is not one.
 var errEndedShort = errors.New("the reply ended before it was complete")
 
+// errDoneSaid ends a reply's read at the [DONE] a Chat upstream says its
+// reply over with: the reply is whole by its protocol, its usage in the
+// chunks before it, and a vendor that holds the connection after it — a
+// relay slow to hang up (#5936) — kept the client waiting on the
+// translated reply's end, said only when the reading gave up, until the
+// client gave up first.
+var errDoneSaid = errors.New("the stream said its reply over")
+
+// endsAtProbeCap says whether a reply that stopped short of its end, its
+// connection closed cleanly, is taken as one that ended at its length:
+// the request capped it at a short probe's worth (cutVoidTokens) and the
+// reply spent some of it, thinking or saying something. A vendor that
+// ends a reply at max_tokens with no closing event looks the same as one
+// that cut it, and a reply asked for 16 tokens that thought them all is
+// what such an ending most likely is: Open Design's glm-5.3-flash always
+// thinks, spent a model test's 16 tokens on it and ended after
+// content_block_stop, with no message_delta or message_stop, so every
+// plain test of it through a remote magpie was a 502 waited out through
+// the patience (plugins#827). A larger reply that ends so is still a cut,
+// and so is a Gemini or Code Assist one of any size: Gemini ends every
+// reply with its finishReason, MAX_TOKENS included, so one without it was
+// cut (vertexCut, asked for 256, TestGeminiUpstreamEndedShort).
+func endsAtProbeCap(proto provider.Protocol, capped int, spent bool) bool {
+	return (proto == provider.Anthropic || proto == provider.Responses) &&
+		spent && capped > 0 && capped <= cutVoidTokens
+}
+
+// spends says whether an event spent some of a reply's tokens: text,
+// a call, reasoning, a search or an image.
+func spends(ev Event) bool {
+	switch ev.Kind {
+	case KThink, KSealed:
+		return true
+	}
+	return saysSomething(ev)
+}
+
 // geminiEnds says whether a Gemini chunk ends the reply, as replyEnds
 // does for events that name their type. Gemini's and Code Assist's chunks
 // name none and there is no [DONE]: the last one is the one whose
@@ -89,7 +132,7 @@ var errEndedShort = errors.New("the reply ended before it was complete")
 // a reply said nothing, and is the empty reply's to answer (#667), not a
 // cut one's.
 func geminiEnds(data []byte) bool {
-	if !bytes.Contains(data, []byte(`"finishReason"`)) && bytes.Contains(data, []byte(`"candidates"`)) {
+	if !bodyHas(data, `"finishReason"`) && bodyHas(data, `"candidates"`) {
 		return false
 	}
 	type chunk struct {
@@ -154,7 +197,7 @@ func saysItsEnd(p provider.Provider, proto provider.Protocol, model string) bool
 	case proto == provider.Anthropic, proto == provider.Responses, geminiKin(proto):
 		return true
 	case proto == provider.Chat:
-		return geminiCompat(p.Host(), model) || p.Host() == commandCodeHost
+		return geminiCompat(p.VendorHost(), model) || p.VendorHost() == commandCodeHost
 	}
 	return false
 }
@@ -257,7 +300,7 @@ func prefillHow(p provider.Provider, to provider.Protocol, model string) string 
 	case provider.Anthropic:
 		return "anthropic"
 	case provider.Chat:
-		return chatPrefill(p.Host(), model)
+		return chatPrefill(p.VendorHost(), model)
 	}
 	return ""
 }
@@ -428,7 +471,11 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 	// said nothing and counted none fails too (repliesCounted, #2086)
 	var counts bool
 	// voids: a reply in this protocol cut at its length that says nothing
-	// fails at once, asked again nowhere (cutVoid, #2972)
+	// fails at once, asked again nowhere (cutVoid, #2972); one that said
+	// nothing and never gave a finish_reason fails as an empty reply
+	// (Copilot's gemini-4-carbon, now and then, answered 200 with only a
+	// usage frame, which went to Codex as a response.completed with
+	// nothing in it: codealc on X)
 	var voids bool
 	empties := 0 // the times such a reply was asked again here
 	said, stop := false, ""
@@ -439,6 +486,8 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 	// try's reasoning was found stuck in a loop before it had, and it is
 	// let go to ask again (loopReasks)
 	var spoke, relooped bool
+	// spent: this try spent some of the reply's tokens (endsAtProbeCap)
+	var spent bool
 	var summaryUpstream bool
 	reasks := 0
 	if h, ok := w.(*holdWriter); ok {
@@ -460,6 +509,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			return // the rest of a try let go for its loop
 		}
 		spoke = spoke || saysSomething(ev)
+		spent = spent || spends(ev)
 		switch ev.Kind {
 		case KThink, KSealed:
 			if ev.Kind == KThink && !summaryUpstream {
@@ -526,7 +576,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 		// continuation's prefill away
 		cutBy, cutCode, cutErr := failed, failedCode, serr
 		failed, failedCode, failedStatus, cut, serr = "", "", 0, false, nil
-		errNamed = 0
+		errNamed, spent = 0, false
 		var held func() // what a textCallSee of this try holds back
 		req := request
 		if cont.resume {
@@ -572,7 +622,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				if turnedAway {
 					markAntigravityTurnsAway(w, request.System)
 				}
-				if p.Preset == "openrouter" && openRouterSharedPool(b) {
+				if p.VendorPreset() == "openrouter" && openRouterSharedPool(b) {
 					markOpenRouterSharedPool(w)
 				}
 				keepRetry(w.Header(), res.Header, b)
@@ -609,7 +659,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				// upstream's 200 is in, and a holdWriter holds what is
 				// written for another candidate to answer still
 				var wmu sync.Mutex
-				heard, stopKeep := keepThroughSilence(&wmu, func() {
+				heard, stopKeep := keepThroughSilence(keepaliveEvery, &wmu, func() {
 					if failed == "" && !cut && !relooped && sw.quiet() >= keepaliveEvery/2 {
 						enc.keepalive()
 					}
@@ -629,6 +679,11 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 					if cut || relooped {
 						return errStreamCut
 					}
+					if saidOver(actual, data) {
+						// the upstream's own end: what the reply has is
+						// whole, hold or not (#5936)
+						return errDoneSaid
+					}
 					return nil
 				}, func() {
 					wmu.Lock()
@@ -638,7 +693,9 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				})
 				stopKeep()
 				res.Body.Close()
-				if errors.Is(serr, errStreamCut) {
+				if errors.Is(serr, errStreamCut) || errors.Is(serr, errDoneSaid) {
+					// a cut's error event is in hand; a [DONE] said
+					// the reply over: neither is the read's to fail on
 					serr = nil
 				}
 				if serr == nil && failed == "" && !ended && !relooped &&
@@ -657,6 +714,14 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 						// finish_reason after its generation was done
 						u.add(Usage{Stop: fin})
 						serr = dec(string(finishChunk(fin)), attemptSee)
+					} else if endsAtProbeCap(actual, req.MaxTokens, spent) {
+						// a short probe's reply that stopped at its own
+						// small limit with no end said (plugins#827):
+						// ended at its length, as the vendor should have
+						// said
+						u.add(Usage{Stop: "length"})
+						serr = nil
+						attemptSee(Event{Kind: KStop, Stop: "length"})
 					}
 				}
 			}
@@ -682,7 +747,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			if held != nil {
 				held()
 			}
-			if (empty || counts && uncounted(this)) && !said && answersNothing(stop) {
+			if (empty || counts && uncounted(this) || voids && stop == "") && !said && answersNothing(stop) {
 				if empties < emptyRetries(w, r.Context()) && r.Context().Err() == nil && !p.PassesErrors() {
 					// asked again here first, for the agent to have the
 					// answer rather than the error: Gemini on a long
@@ -712,7 +777,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				// nowhere: its budget is spent, and a second ask at the
 				// same max_tokens would mostly spend it twice over before
 				// the error (#2972, its review)
-				failed = cutVoidFailed(p.Name)
+				failed = cutVoidFailed(p.Name, request.MaxTokens)
 				break
 			}
 			for _, ev := range kept {
@@ -768,4 +833,23 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 		enc.event(Event{Kind: KError, Text: failed, Code: failedCode})
 	}
 	return 200, failed
+}
+
+// saidOver reports whether an upstream event is its protocol's own last
+// word on a reply that went well: Chat's [DONE], Anthropic's message_stop,
+// Responses' completed, incomplete or failed. A relay that holds the
+// connection after it must not hold the translated reply's end (#5936).
+func saidOver(proto provider.Protocol, data string) bool {
+	switch proto {
+	case provider.Chat:
+		return strings.TrimSpace(data) == "[DONE]"
+	case provider.Anthropic:
+		return eventType(data) == "message_stop"
+	case provider.Responses:
+		switch eventType(data) {
+		case "response.completed", "response.incomplete", "response.failed":
+			return true
+		}
+	}
+	return false
 }

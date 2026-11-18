@@ -10,6 +10,14 @@
 // R2 only for files it has with that hash, so nothing is ever only on R2.
 // The app checks every file against the feed's hash wherever it came from.
 //
+// The build provenance goes the same way. Release CI attests every file
+// (SLSA, Sigstore; v0.1.3891 on) and GitHub keeps the bundles behind its
+// API, which can be down when the files are not. The cron copies them into
+// R2 as one file per release, <tag>/attestations.jsonl, a bundle to a line,
+// which `gh attestation verify <file> -R yetone/magpie-releases --bundle
+// attestations.jsonl` takes offline (ArcticLampyrid on X). It is not a
+// release asset, so the release's file count is unchanged.
+//
 // Each release is about 1 GB; the tags the feeds name and the KEEP newest
 // besides are kept, the rest deleted (prune), and an older tag's files go
 // to GitHub.
@@ -18,6 +26,10 @@ const KEEP = 4;
 // a cron run starts no new copy after this long, so the next run (five
 // minutes on) doesn't copy the same file beside it
 const BUDGET = 4 * 60e3;
+
+// the first release whose files carry a build attestation
+const ATTESTED = "0.1.3891";
+export const BUNDLES = "attestations.jsonl";
 
 export function githubFile(repo, tag, name) {
   return `https://github.com/${repo}/releases/download/${tag}/${name}`;
@@ -51,10 +63,20 @@ export async function serve(req, env, repo, tag, name) {
   }
   // onlyIf not met: the object comes without its body
   if (!("body" in obj) || !obj.body) return new Response(null, { status: req.headers.has("If-None-Match") ? 304 : 412, headers });
-  const r = obj.range;
-  if (req.headers.has("Range") && r) {
-    const start = "suffix" in r ? Math.max(0, obj.size - r.suffix) : r.offset || 0;
-    const length = "suffix" in r ? obj.size - start : r.length ?? obj.size - start;
+  if (req.headers.has("Range") && obj.range) {
+    // R2 hands back every key of its range, the ones not asked for as
+    // undefined (a suffix range has offset and length undefined, an
+    // offset range has suffix undefined), so a key's being there says
+    // nothing: only a number does
+    const { offset, length: len, suffix } = obj.range;
+    const num = (n) => typeof n === "number" && Number.isFinite(n);
+    const start = num(suffix) ? Math.max(0, obj.size - suffix) : num(offset) ? offset : 0;
+    const length = num(suffix) ? obj.size - start : num(len) ? Math.min(len, obj.size - start) : obj.size - start;
+    if (start >= obj.size || length <= 0) {
+      // a range this can't state is not sent with a made-up Content-Range
+      try { await obj.body.cancel(); } catch {}
+      return toGitHub();
+    }
     headers.set("Content-Range", `bytes ${start}-${start + length - 1}/${obj.size}`);
     headers.set("Content-Length", String(length));
     return new Response(obj.body, { status: 206, headers });
@@ -100,8 +122,10 @@ export function onR2(rel, have, repo, site) {
 // mirror copies into R2 each file of rels (the feeds' releases, with
 // their hashes) it doesn't hold yet, then prunes. open(name, asset, tag)
 // is the file's bytes from GitHub (a Response), null when GitHub won't
-// give them. Returns {copied, failed}.
-export async function mirror(env, rels, open, now = Date.now) {
+// give them. attest(sha256) is the attestation bundles GitHub holds for a
+// digest (an array of objects), null when it can't say. Returns {copied,
+// failed}.
+export async function mirror(env, rels, open, now = Date.now, attest = null) {
   const done = { copied: [], failed: [] };
   if (!env.RELEASES) return done;
   const until = now() + BUDGET;
@@ -119,9 +143,74 @@ export async function mirror(env, rels, open, now = Date.now) {
       if (await copy(env, tag, name, a, open)) done.copied.push(`${tag}/${name}`);
       else done.failed.push(`${tag}/${name}`);
     }
+    if (attest && !(BUNDLES in have) && byVersion(tag, "v" + ATTESTED) >= 0 && now() <= until) {
+      if (await keepBundles(env, tag, rel, attest)) done.copied.push(`${tag}/${BUNDLES}`);
+      else done.failed.push(`${tag}/${BUNDLES}`);
+    }
   }
-  await prune(env, tags);
+  const kept = await prune(env, tags);
+  // a release the feeds named for one run only (the next tag came minutes
+  // later) can leave that run with its files copied and its budget spent;
+  // its bundles are filled in from the files R2 holds of it, while kept
+  for (const tag of kept) {
+    if (!attest || byVersion(tag, "v" + ATTESTED) < 0 || now() > until) continue;
+    const have = await held(env, tag);
+    if (!have || BUNDLES in have) continue;
+    const assets = {};
+    for (const [name, sha256] of Object.entries(have)) if (sha256) assets[name] = { sha256 };
+    if (!Object.keys(assets).length) continue;
+    if (await keepBundles(env, tag, { assets }, attest)) done.copied.push(`${tag}/${BUNDLES}`);
+    else done.failed.push(`${tag}/${BUNDLES}`);
+  }
   return done;
+}
+
+// keepBundles puts every attestation GitHub has for rel's files in R2 as
+// <tag>/attestations.jsonl. It writes nothing unless every file has one, so
+// the next run asks again rather than keep a list with holes in it.
+async function keepBundles(env, tag, rel, attest) {
+  const lines = new Set();
+  // release CI signs every file in one statement, so the first answer
+  // covers the rest: GitHub's API is asked once a release, not once a file
+  // (unsigned, it allows 60 an hour to an IP the worker shares)
+  const covered = new Set();
+  for (const [name, a] of Object.entries(rel.assets)) {
+    if (!a.sha256 || covered.has(a.sha256)) continue;
+    let got = null;
+    try {
+      got = await attest(a.sha256);
+    } catch (e) {
+      console.log("r2 attest: github", tag, name, String(e));
+    }
+    if (!Array.isArray(got) || !got.length) {
+      console.log("r2 attest: none for", tag, name);
+      return false;
+    }
+    for (const b of got) {
+      lines.add(JSON.stringify(b));
+      for (const h of subjects(b)) covered.add(h);
+    }
+  }
+  if (!lines.size) return false;
+  try {
+    await env.RELEASES.put(`${tag}/${BUNDLES}`, [...lines].join("\n") + "\n", {
+      httpMetadata: { contentType: "application/jsonl", contentDisposition: `attachment; filename="${BUNDLES}"` },
+    });
+    return true;
+  } catch (e) {
+    console.log("r2 attest: put", tag, String(e));
+    return false;
+  }
+}
+
+// subjects is the sha256 of each file a Sigstore bundle's statement names.
+export function subjects(b) {
+  try {
+    const st = JSON.parse(atob(b.dsseEnvelope.payload));
+    return (st.subject || []).map((x) => x.digest && x.digest.sha256).filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 async function copy(env, tag, name, a, open) {
@@ -157,7 +246,8 @@ async function copy(env, tag, name, a, open) {
   }
 }
 
-// prune deletes every tag but keep and the KEEP newest besides.
+// prune deletes every tag but keep and the KEEP newest besides, and
+// returns those KEEP newest.
 async function prune(env, keep) {
   let tags = [], cursor;
   try {
@@ -168,7 +258,7 @@ async function prune(env, keep) {
     } while (cursor);
   } catch (e) {
     console.log("r2 prune: list", String(e));
-    return;
+    return [];
   }
   const rest = tags.filter((t) => !keep.includes(t)).sort((a, b) => byVersion(b, a));
   for (const tag of rest.slice(KEEP)) {
@@ -181,6 +271,7 @@ async function prune(env, keep) {
       console.log("r2 prune: delete", tag, String(e));
     }
   }
+  return rest.slice(0, KEEP);
 }
 
 function byVersion(a, b) {

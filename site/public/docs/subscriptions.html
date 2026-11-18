@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Use your Claude, ChatGPT or GitHub Copilot subscription in any coding agent · magpie</title>
-<meta name="description" content="Sign in to Claude, ChatGPT, GitHub Copilot, Gemini Code Assist or Antigravity once in magpie, and use its models in Claude Code, Codex, Gemini CLI, OpenCode and other agents, with several accounts and failover.">
+<meta name="description" content="Sign in to Claude, ChatGPT, GitHub Copilot or Gemini Code Assist once in magpie, and use its models in Claude Code, Codex, Gemini CLI, OpenCode and other agents, with several accounts and failover.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#fafafa">
 <script>
@@ -35,7 +35,7 @@
 <link rel="stylesheet" href="/docs.css">
 <meta property="og:site_name" content="magpie">
 <meta property="og:title" content="Use your Claude Pro/Max, ChatGPT Plus/Pro or GitHub Copilot subscription in any coding agent">
-<meta property="og:description" content="Sign in to Claude, ChatGPT, GitHub Copilot, Gemini Code Assist or Antigravity once in magpie, and use its models in Claude Code, Codex, Gemini CLI, OpenCode and other agents, with several accounts and failover.">
+<meta property="og:description" content="Sign in to Claude, ChatGPT, GitHub Copilot or Gemini Code Assist once in magpie, and use its models in Claude Code, Codex, Gemini CLI, OpenCode and other agents, with several accounts and failover.">
 <meta property="og:image" content="https://usemagpie.ai/img/og.png">
 <meta property="og:url" content="https://usemagpie.ai/docs/subscriptions">
 <meta name="twitter:card" content="summary_large_image">
@@ -46,7 +46,7 @@
   {
    "@type": "TechArticle",
    "headline": "Use your Claude Pro/Max, ChatGPT Plus/Pro or GitHub Copilot subscription in any coding agent",
-   "description": "Sign in to Claude, ChatGPT, GitHub Copilot, Gemini Code Assist or Antigravity once in magpie, and use its models in Claude Code, Codex, Gemini CLI, OpenCode and other agents, with several accounts and failover.",
+   "description": "Sign in to Claude, ChatGPT, GitHub Copilot or Gemini Code Assist once in magpie, and use its models in Claude Code, Codex, Gemini CLI, OpenCode and other agents, with several accounts and failover.",
    "inLanguage": "en",
    "url": "https://usemagpie.ai/docs/subscriptions",
    "about": {
@@ -121,6 +121,29 @@
      }
     }
    ]
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "Docs",
+     "item": "https://usemagpie.ai/docs/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "Use your Claude Pro/Max, ChatGPT Plus/Pro or GitHub Copilot subscription in any coding agent",
+     "item": "https://usemagpie.ai/docs/subscriptions"
+    }
+   ]
   }
  ]
 }
@@ -192,13 +215,12 @@
       <tr><td>ChatGPT (Plus, Pro, Business)</td><td><code>codex/…</code></td><td><code>magpie accounts add codex</code></td></tr>
       <tr><td>GitHub Copilot</td><td><code>copilot/…</code></td><td><code>magpie accounts add copilot</code></td></tr>
       <tr><td>Gemini (Code Assist)</td><td><code>gemini/…</code></td><td><code>magpie accounts add gemini</code></td></tr>
-      <tr><td>Antigravity</td><td><code>antigravity/…</code></td><td><code>magpie accounts add antigravity</code></td></tr>
     </table></div>
     <ul>
       <li><b>Claude.</b> Requests on a Claude subscription run through the Claude Code installed on your computer, so keep it installed.</li>
       <li><b>Copilot.</b> Copilot gives you a code to enter on GitHub’s page. For GitHub Enterprise on its own domain: <code>magpie accounts add copilot --host &lt;name&gt;.ghe.com</code>.</li>
       <li><b>Gemini.</b> This is Gemini CLI’s Google sign-in. Google answers it only for a Code Assist Standard or Enterprise account with a Google Cloud project of its own; <code>magpie accounts project gemini &lt;email&gt; &lt;project&gt;</code> names the project.</li>
-      <li><b>Antigravity.</b> Its sign-in gives Antigravity’s Claude and Gemini models.</li>
+      <li><b>Antigravity.</b> Install <span class="ui">Antigravity (local agy CLI)</span> from <span class="ui">Plugins</span> (<code>magpie plugin add @magpie-community/opencode-agy-cli-auth</code>). It runs the agy CLI you installed and signed in to, so Google sees agy’s own requests. Signing in to Antigravity in magpie directly is retired: Google bans accounts used that way. If you already have the old Antigravity plugin, it keeps working, and the Providers page tells you the risk; it is no longer installed for anyone new.</li>
     </ul>
     <p>Other subscriptions are added as plugins, from magpie’s <span class="ui">Plugins</span> page; see <a href="/docs/plugins">Plugins</a>.</p>
 
@@ -234,9 +256,11 @@
     <h2 id="tools"><a class="anchor" href="#tools">Other tools</a></h2>
     <p>Any tool with a base-URL setting can use a subscription through the gateway too. The <span class="ui">Gateway</span> tab’s <span class="ui">Connect</span> section has the address and key to copy. The base URL is <code>http://127.0.0.1:3425/v1</code> for an OpenAI client and <code>http://127.0.0.1:3425</code> for an Anthropic or Gemini one. See <a href="/docs/integrate">Integrate your app</a>.</p>
 
+    <p>Several accounts or keys can share the load and stand in for each other. See <a href="/docs/routing-groups">Round robin and failover across accounts, keys and providers</a>.</p>
+
     <h2 id="faq"><a class="anchor" href="#faq">FAQ</a></h2>
     <h3>Can I use my ChatGPT Plus or Pro subscription in Claude Code?</h3>
-    <p>Yes. Sign in to ChatGPT in magpie and pick a <code>codex/…</code> model on Claude Code’s row, or run <code>magpie claude codex/gpt-5.5</code>. magpie translates Claude Code’s Anthropic requests for the GPT model and the replies back, tool calls included.</p>
+    <p>Yes. Sign in to ChatGPT in magpie and pick a <code>codex/…</code> model on Claude Code’s row, or run <code>magpie claude codex/gpt-5.5</code>. magpie translates Claude Code’s Anthropic requests for the GPT model and the replies back, tool calls included. The whole setup, tiers and effort included, is in <a href="/docs/claude-code-chatgpt">ChatGPT in Claude Code</a>.</p>
     <h3>Can I use my Claude Pro or Max subscription in Codex or OpenCode?</h3>
     <p>Yes. Sign in to Claude in magpie and pick a <code>claude/…</code> model on the agent’s row. Requests on a Claude subscription run through the Claude Code installed on your computer, so keep it installed.</p>
     <h3>Can I use GitHub Copilot models outside VS Code?</h3>

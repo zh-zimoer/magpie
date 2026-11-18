@@ -58,7 +58,7 @@ func DetectBase(base string, proto Protocol) string {
 		if pu, err := url.Parse(u); err == nil && pu.Host != "" && strings.Trim(pu.Path, "/") == "v1" {
 			return u + "beta"
 		}
-		return GeminiBase(u)
+		return geminiVersioned(u)
 	}
 	if pu, err := url.Parse(u); err == nil && strings.Trim(pu.Path, "/") == "" {
 		return u + "/v1"
@@ -116,6 +116,13 @@ func (p Provider) Detect(ctx context.Context, base, model string, picked ...stri
 		}()
 	}
 	wg.Wait()
+	for i := range out {
+		if out[i].V1 != "" {
+			// answered under the /v1 the URL was typed without: the
+			// base the editor keeps for it is that one
+			out[i].Base = out[i].V1
+		}
+	}
 	return out, nil
 }
 
@@ -198,9 +205,7 @@ func (q Provider) detectOne(proto Protocol, m string, wait time.Duration) (Detec
 // the one p is asked with when none is given, and says how it answered.
 func (p Provider) DetectDecide(ctx context.Context, model string) Detection {
 	p.Decide = strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(p.Decide), "/"), "/systemone")
-	if p.Decide != "" && !strings.Contains(p.Decide, "://") {
-		p.Decide = "https://" + p.Decide
-	}
+	p.Decide = WithScheme(p.Decide, "https")
 	if model = strings.TrimSpace(model); model == "" {
 		model = p.Jev()
 	}

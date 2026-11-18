@@ -121,6 +121,29 @@
      }
     }
    ]
+  },
+  {
+   "@type": "BreadcrumbList",
+   "itemListElement": [
+    {
+     "@type": "ListItem",
+     "position": 1,
+     "name": "magpie",
+     "item": "https://usemagpie.ai/zh/"
+    },
+    {
+     "@type": "ListItem",
+     "position": 2,
+     "name": "文档",
+     "item": "https://usemagpie.ai/docs/zh/start"
+    },
+    {
+     "@type": "ListItem",
+     "position": 3,
+     "name": "Claude Code 接入 DeepSeek、Kimi、GLM、Qwen 等国产模型",
+     "item": "https://usemagpie.ai/docs/zh/claude-code-models"
+    }
+   ]
   }
  ]
 }
@@ -240,7 +263,7 @@ magpie claude haiku ""                           # 回到跟随主模型</pre></
     <p>在 magpie 里登录订阅：<span class="ui">＋ 添加供应商</span>，选 ChatGPT 或 Copilot。magpie 会打开官方的登录页。登录后，账号里的模型以 <code>codex/…</code> 或 <code>copilot/…</code> 出现在 Claude Code 的模型列表里。</p>
     <div class="code"><span class="lang">终端</span><button class="copy" data-copy="ex-cc-gpt">复制</button><pre id="ex-cc-gpt">magpie accounts add codex      # 登录一个 ChatGPT 账号
 magpie claude codex/gpt-5.5</pre></div>
-    <p>Claude Code 说的还是 Anthropic Messages，magpie 把每个请求转成 GPT 模型能懂的格式，再把回复转回来，工具调用也包括在内。Antigravity 账号同理，模型是 <code>antigravity/…</code>。</p>
+    <p>Claude Code 说的还是 Anthropic Messages，magpie 把每个请求转成 GPT 模型能懂的格式，再把回复转回来，工具调用也包括在内。Antigravity 账号同理，模型是 <code>antigravity/…</code>。ChatGPT 套餐的完整用法，包括分档、推理强度和额度，见 <a href="/docs/zh/claude-code-chatgpt">Claude Code 用 ChatGPT</a>。</p>
 
     <h2 id="routing"><a class="anchor" href="#routing">多个 Key 轮换</a></h2>
     <p>有多个 Key 或账号时，magpie 可以把 Claude Code 的请求分摊到它们上面，一个用完自动换下一个。</p>
@@ -251,7 +274,7 @@ magpie claude codex/gpt-5.5</pre></div>
     </ul>
     <p>各种路由方式见 <a href="/docs/zh/start#routing">快速上手</a>。</p>
 
-    <p><b>按供应商：</b><a href="/docs/zh/deepseek">DeepSeek</a> · <a href="/docs/zh/kimi">Kimi 与 Kimi Code</a> · <a href="/docs/zh/glm">GLM 编程套餐</a></p>
+    <p><b>按供应商：</b><a href="/docs/zh/deepseek">DeepSeek</a> · <a href="/docs/zh/kimi">Kimi 与 Kimi Code</a> · <a href="/docs/zh/glm">GLM 编程套餐</a> · <a href="/docs/zh/volcengine">火山方舟</a> · <a href="/docs/zh/tencent-cloud">腾讯云</a> · <a href="/docs/zh/baidu-qianfan">百度千帆</a> · <a href="/docs/zh/siliconflow">硅基流动</a> · <a href="/docs/zh/modelscope">魔搭</a> · <a href="/docs/zh/huaweicloud">华为云 MaaS</a> · <a href="/docs/zh/xiaomi-mimo">小米 MiMo</a> · <a href="/docs/zh/stepfun">阶跃星辰</a> · <a href="/docs/zh/longcat">LongCat</a> · <a href="/docs/zh/qwen">通义千问</a> · <a href="/docs/zh/minimax">MiniMax</a> · <a href="/docs/zh/anthropic">Anthropic</a> · <a href="/docs/zh/openai">OpenAI</a> · <a href="/docs/zh/gemini">Gemini</a> · <a href="/docs/zh/grok">Grok</a> · <a href="/docs/zh/mistral">Mistral</a> · <a href="/docs/zh/openrouter">OpenRouter</a> · <a href="/docs/zh/copilot">GitHub Copilot</a> · <a href="/docs/zh/ollama">Ollama</a></p>
 
     <h2 id="faq"><a class="anchor" href="#faq">常见问题</a></h2>
     <h3>需要自己设置 <code>ANTHROPIC_BASE_URL</code> 吗？</h3>
@@ -269,7 +292,7 @@ magpie claude codex/gpt-5.5</pre></div>
     <h3>怎么撤销？</h3>
     <p>在 magpie 里选 Claude Code 自己的模型，或者运行 <code>magpie claude default</code>。magpie 写的内容会去掉，被替换的内容会恢复。</p>
 
-    <p style="margin-top:48px">也在用 Codex？见 <a href="/docs/zh/codex-models">Codex 接入其他模型</a>。遇到问题可以到 <a href="https://discord.gg/vGSnD3ZKQF">Discord</a> 提问。</p>
+    <p style="margin-top:48px">也在用 Codex？见 <a href="/docs/zh/codex-models">Codex 接入其他模型</a>。用 Claude Desktop？见 <a href="/docs/zh/claude-desktop">让 Claude Desktop 用任意模型</a>。遇到问题可以到 <a href="https://discord.gg/vGSnD3ZKQF">Discord</a> 提问。</p>
   </article>
 </main>
 

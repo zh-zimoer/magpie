@@ -175,6 +175,9 @@ func revealable(v *library.View) []string {
 
 func libraryRoutes(mux *http.ServeMux, w Windows) {
 	browserRoutes(mux, w)
+	memoryRoutes(mux)
+	memoryDistillRoutes(mux)
+	memorySemanticRoutes(mux)
 	mux.HandleFunc("GET /api/library", func(rw http.ResponseWriter, r *http.Request) {
 		v, err := libraryRead(nil, r.URL.Query().Get("glance") == "1")
 		if err != nil {
@@ -205,6 +208,10 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 	})
 	mux.HandleFunc("GET /api/library/market/skills", func(rw http.ResponseWriter, r *http.Request) {
 		list, err := library.MarketSkills(r.URL.Query().Get("q"))
+		writeJSON(rw, marketOf(list, err))
+	})
+	mux.HandleFunc("GET /api/library/market/pi", func(rw http.ResponseWriter, r *http.Request) {
+		list, err := library.MarketPiPackages(r.URL.Query().Get("q"))
 		writeJSON(rw, marketOf(list, err))
 	})
 	mux.HandleFunc("POST /api/library/market/about", func(rw http.ResponseWriter, r *http.Request) {
@@ -242,6 +249,46 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, p)
 	})
+	// the Claude Code plugins at an address: a folder, a repository, a
+	// marketplace.json (plugin.go); nothing is written
+	mux.HandleFunc("POST /api/library/plugins/probe", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Source string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		p, err := library.ProbePlugins(in.Source)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, p)
+	})
+	// the subagents at an address: a repository, a folder in one, a file,
+	// a folder here (subagent_import.go); nothing is written
+	mux.HandleFunc("POST /api/library/subagents/probe", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Source string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		p, err := library.ProbeSubagents(in.Source)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, p)
+	})
+	// the slash commands the agents here have of their own
+	// (command_import.go); nothing is written
+	mux.HandleFunc("POST /api/library/commands/probe", func(rw http.ResponseWriter, r *http.Request) {
+		p, err := library.ProbeCommands()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, p)
+	})
 	// which skills GitHub has changed: the page as it is, each skill from
 	// there carrying what the check found of it
 	mux.HandleFunc("POST /api/library/skills/check", func(rw http.ResponseWriter, r *http.Request) {
@@ -273,6 +320,78 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			libraryJSON
 			Regrouped int `json:"regrouped"`
 		}{v, n})
+	})
+	// Pi's extensions and packages, for each Pi here (this computer's and
+	// each WSL distro's): switched on or off as Pi itself does it, and
+	// copied from one Pi to another
+	mux.HandleFunc("GET /api/library/pi", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, library.ReadPiExtensions())
+	})
+	mux.HandleFunc("POST /api/library/pi", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Pi, Ext, Pkg string
+			On           bool
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		var v *library.PiExtensions
+		var err error
+		switch {
+		case in.Ext != "" && in.Pkg == "":
+			v, err = library.SetPiExtension(in.Pi, in.Ext, in.On)
+		case in.Pkg != "" && in.Ext == "":
+			v, err = library.SetPiPackage(in.Pi, in.Pkg, in.On)
+		default:
+			err = errors.New("name one extension or one package")
+		}
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
+	})
+	mux.HandleFunc("POST /api/library/pi/copy", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ From, To, Ext, Pkg string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		v, err := library.CopyPi(in.From, in.To, in.Ext, in.Pkg)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
+	})
+	// a package from Pi's market installed into a Pi, or one of a Pi's
+	// packages removed, by Pi's own install and remove
+	mux.HandleFunc("POST /api/library/pi/install", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Pi, Source string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		v, err := library.InstallPiPackage(in.Pi, in.Source)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
+	})
+	mux.HandleFunc("POST /api/library/pi/remove", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Pi, Source string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		v, err := library.RemovePiPackage(in.Pi, in.Source)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
 	})
 	// RTK:which agents have its hook, switching one on or off, and
 	// installing rtk when the page is asked to
@@ -351,6 +470,59 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, v)
 	})
+	// billion-context: which agents have its plugin, switching one on or
+	// off, and installing bili when the page is asked to
+	mux.HandleFunc("GET /api/library/bili", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, library.ReadBili())
+	})
+	mux.HandleFunc("POST /api/library/bili", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Agent string
+			On    bool
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		v, err := library.SetBili(in.Agent, in.On)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
+	})
+	// billion-context.json's settings the tab changes, with the models
+	// magpie can give its summaries; a change is written and every
+	// running billion-context asked to reload it
+	mux.HandleFunc("GET /api/library/bili/settings", func(rw http.ResponseWriter, r *http.Request) {
+		v, err := library.ReadBiliSettings()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, biliSettingsView{v, servedModels()})
+	})
+	mux.HandleFunc("POST /api/library/bili/settings", func(rw http.ResponseWriter, r *http.Request) {
+		var c library.BiliChange
+		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
+			fail(rw, err)
+			return
+		}
+		v, err := library.SetBiliSettings(c)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, biliSettingsView{v, servedModels()})
+	})
+	mux.HandleFunc("POST /api/library/bili/install", func(rw http.ResponseWriter, r *http.Request) {
+		v, err := library.InstallBili()
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
+	})
 	// a project's folder, from the system's picker; "" when it's cancelled
 	mux.HandleFunc("POST /api/library/projects/choose", func(rw http.ResponseWriter, r *http.Request) {
 		dir, err := w.ChooseFolder("Choose a project")
@@ -396,17 +568,27 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 	})
 	// magpie signs in to a remote server once, for every agent given it (#615)
 	mux.HandleFunc("POST /api/library/mcp-signin", func(rw http.ResponseWriter, r *http.Request) {
-		var in struct{ Name string }
+		var in struct {
+			Name  string
+			Add   bool // as another account of the server, called Label
+			Label string
+		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Name == "" {
 			http.Error(rw, "no server", http.StatusBadRequest)
 			return
 		}
-		st, err := library.SignInServer(r.Context(), in.Name)
+		var st mcpauth.State
+		var err error
+		if in.Add {
+			st, err = library.SignInServerAccount(r.Context(), in.Name, in.Label)
+		} else {
+			st, err = library.SignInServer(r.Context(), in.Name)
+		}
 		if err != nil {
 			fail(rw, err)
 			return
 		}
-		writeJSON(rw, mcpSignInOpened{st, openError(w, st.URL)})
+		writeJSON(rw, openMCPSignIn(w, st))
 	})
 	mux.HandleFunc("GET /api/library/mcp-signin/{id}", func(rw http.ResponseWriter, r *http.Request) {
 		st, ok := mcpauth.Progress(r.PathValue("id"))
@@ -419,6 +601,45 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("POST /api/library/mcp-signin/{id}/cancel", func(rw http.ResponseWriter, r *http.Request) {
 		mcpauth.Cancel(r.PathValue("id"))
 		rw.WriteHeader(http.StatusNoContent)
+	})
+	// a server's accounts (Elorynth on X): Kind "signin" is magpie's OAuth
+	// sign-ins to it, "header" the sets of headers it is asked with; ID "" in
+	// a use is the server's own headers
+	mux.HandleFunc("POST /api/library/mcp-account", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Name, Kind, Op, ID, Label string
+			Headers                   map[string]string
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Name == "" {
+			http.Error(rw, "no server", http.StatusBadRequest)
+			return
+		}
+		var err error
+		switch in.Kind + "/" + in.Op {
+		case "signin/use":
+			err = library.UseSignIn(in.Name, in.ID)
+		case "signin/remove":
+			err = library.RemoveSignIn(in.Name, in.ID)
+		case "header/add":
+			_, err = library.AddServerAccount(in.Name, in.Label, in.Headers)
+		case "header/use":
+			_, err = library.UseServerAccount(in.Name, in.ID)
+		case "header/remove":
+			_, err = library.RemoveServerAccount(in.Name, in.ID)
+		default:
+			http.Error(rw, "not an account call", http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		v, err := libraryView(nil)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
 	})
 	mux.HandleFunc("POST /api/library/mcp-signout", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct{ Name string }
@@ -481,19 +702,24 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			// Agents is named as the page sends it, so that it is this
 			// and not the instructions' own Agents that "agents" fills
 			Agents []string `json:"agents"`
-			Source string
-			Paths  []string
-			Names  []string // the skills to update, of those a check found changed; to bring in, of those found in the agents
-			Server library.Server
-			Hook   library.Hook // a hook saved (#1790)
+			// Description is a new skill's (skills/create)
+			Description string `json:"description"`
+			Source      string
+			Paths       []string
+			Names       []string // the skills to update, of those a check found changed; to bring in, of those found in the agents
+			Server      library.Server
+			Hook        library.Hook   // a hook saved (#1790)
+			Env         library.EnvVar // a variable saved
 			// a subagent saved (#2283)
 			Subagent library.Subagent
+			Command  library.Command
 			Agent    string            // the agent whose own skill is in the library's way
 			App      string            // the app the MCP hub is added to (servers/hub-open)
 			Note     string            // what the MCP router says of itself (servers/hub-note), or a skill's note (skills/note)
 			ID       string            // a market server's, or a market skill's in its repository
 			Values   map[string]string // what a market server needs
 			Dir      string            // a project's folder
+			Instr    *string           `json:"instr"` // a project's own instructions (projects/instructions)
 			Copy     bool              // a project gets copies, not links
 			Keep     bool              // a project removed keeps what magpie put in it
 			On       bool              // every skill or server given to the agents, or taken from them
@@ -547,6 +773,11 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			// a plugin's tools off for every agent, or on again, from its
 			// row on the Plugins page (Name is the plugin's)
 			res, err = library.PluginServerOn(in.Name, in.On)
+		case "servers/on":
+			// off for every agent, project and app at the router's
+			// address, kept with its settings, or on again as it was
+			// (swang20201 on X)
+			res, err = library.ServerOn(in.Name, in.On)
 		case "servers/agents-all":
 			res, err = library.EveryServerAgents(in.Agents, in.On)
 		case "servers/agents-some":
@@ -561,6 +792,12 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.RemoveFoundServer(in.Name)
 		case "hooks/save":
 			res, err = library.SaveHook(in.Old, in.Hook)
+		case "env/save":
+			res, err = library.SaveEnv(in.Old, in.Env)
+		case "env/agents":
+			res, err = library.EnvAgents(in.Name, in.Agents)
+		case "env/remove":
+			res, err = library.RemoveEnv(in.Name)
 		case "hooks/agents":
 			res, err = library.HookAgents(in.Name, in.Agents)
 		case "hooks/agents-some":
@@ -569,14 +806,36 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.RemoveHooks([]string{in.Name})
 		case "hooks/remove-all":
 			res, err = library.RemoveHooks(in.Names)
+		case "plugins/install":
+			res, err = library.InstallPlugins(in.Source, in.Names, in.Agents)
+		case "plugins/agents":
+			res, err = library.PluginAgents(in.Name, in.Agents)
+		case "plugins/on":
+			res, err = library.PluginOn(in.Name, in.On)
+		case "plugins/update":
+			res, err = library.UpdatePlugin(in.Name)
+		case "plugins/remove":
+			res, err = library.RemovePlugin(in.Name)
 		case "subagents/save":
 			res, err = library.SaveSubagent(in.Old, in.Subagent)
 		case "subagents/agents":
 			res, err = library.SubagentAgentsSet(in.Name, in.Agents)
 		case "subagents/remove":
 			res, err = library.RemoveSubagents([]string{in.Name})
+		case "commands/save":
+			res, err = library.SaveCommand(in.Old, in.Command)
+		case "commands/agents":
+			res, err = library.CommandAgentsSet(in.Name, in.Agents)
+		case "commands/remove":
+			res, err = library.RemoveCommands([]string{in.Name})
+		case "commands/import":
+			res, err = library.ImportCommands(in.Paths)
+		case "subagents/import":
+			res, err = library.ImportSubagents(in.Source, in.Paths, in.Agents)
 		case "skills/install":
 			res, err = library.InstallSkills(in.Source, in.Paths, in.Agents)
+		case "skills/create":
+			res, err = library.CreateSkill(in.Name, in.Description, in.Agents)
 		case "skills/update":
 			res, err = library.UpdateSkill(in.Name, in.Replace)
 			var gone *library.GoneError
@@ -634,6 +893,9 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		case "skills/where":
 			// each agent's own folder, or ~/.agents/skills too (skills_shared.go)
 			res, err = library.SetSkillsWhere(in.How)
+		case "skills/auto-update":
+			// fetched again by themselves when changed there (skill_autoupdate.go)
+			res, err = library.SetAutoUpdateSkills(in.On)
 		case "skills/router":
 			// magpie's one skill listing the rest (skill_router.go)
 			res, err = library.SetSkillRouter(in.On)
@@ -652,10 +914,26 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.RemoveProject(in.Dir, in.Keep)
 		case "projects/skill":
 			res, err = library.ProjectSkill(in.Dir, in.Name, in.Agents)
+		case "projects/skills":
+			res, err = library.ProjectSkills(in.Dir, in.Names, in.Agents)
+		case "projects/subagents":
+			res, err = library.ProjectSubagents(in.Dir, oneOrMore(in.Name, in.Names), in.Agents)
 		case "projects/server":
 			res, err = library.ProjectServer(in.Dir, in.Name, in.Agents)
+		case "projects/server-off":
+			// a Library server turned off in this project only
+			res, err = library.ProjectServerOff(in.Dir, in.Name, in.Agents)
+		case "projects/skill-off":
+			res, err = library.ProjectSkillsOff(in.Dir, oneOrMore(in.Name, in.Names), in.Agents)
 		case "projects/copy":
 			res, err = library.ProjectCopy(in.Dir, in.Copy)
+		case "projects/instructions":
+			// the text, the agents (sent as [] for none), or both
+			c := library.ProjectInstr{Text: in.Instr}
+			if in.Agents != nil {
+				c.Agents = &in.Agents
+			}
+			res, err = library.ProjectInstructions(in.Dir, c)
 		case "all/sync":
 			res, err = library.Sync()
 		default:
@@ -691,4 +969,11 @@ func oneOrMore(name string, names []string) []string {
 		return names
 	}
 	return []string{name}
+}
+
+// biliSettingsView is billion-context.json's settings with the models
+// the tab's picker offers
+type biliSettingsView struct {
+	*library.BiliSettings
+	Models []modelRef `json:"models"`
 }

@@ -28,19 +28,26 @@ var keySlotFree = []string{
 	"DELETE " + KeysPath + "/{id}", "POST " + OIDCKeysPath, "POST " + provider.RemoteProvePath,
 	"POST " + RestartPath, "POST " + provider.RemoteUpdatePath, "POST /v1/messages/count_tokens",
 	"POST " + claudeMCPPath + "{token}", "/mcp/{name}", "/mcp/run/{name}", SearchMCPPath, VisionMCPPath,
-	ImageMCPPath, BrowserMCPPath, ImageMCPFiles + "{name}", ToolsMCPPath, ToolsMCPOne + "{plugin}",
-	HubMCPPath + "{agent}", HubMCPAll, "/",
+	ImageMCPPath, BrowserMCPPath, MemoryMCPPath, SessionsMCPPath, ImageMCPFiles + "{name}", ToolsMCPPath, ToolsMCPOne + "{plugin}",
+	HubMCPPath + "{agent}", HubMCPAll, "/", "POST " + joinData, AdminPath,
+	// the chat page's files are kept in magpie, never sent to a model
+	"POST " + ChatPagePath + "/anthropic/v1/files", "DELETE " + ChatPagePath + "/anthropic/v1/files/{id}",
 }
 
+// keySlotGets are the GETs that spend as a chat does, so a key's
+// MaxConcurrency holds them: a realtime session's upgrade, its slot held
+// while the session lasts.
+var keySlotGets = []string{"GET /v1/realtime", "GET /realtime"}
+
 // Every route is judged for a key's MaxConcurrency: held (keySlotRoutes)
-// or not (keySlotFree, or a GET's), never both, and keySlotRoutes names
-// only routes the router has.
+// or not (keySlotFree, or a GET's other than keySlotGets), never both, and
+// keySlotRoutes names only routes the router has.
 func TestKeySlotEveryRoute(t *testing.T) {
 	fresh(t)
 	mux := New().routes()
 	for _, p := range mux.patterns {
 		_, held := keySlotRoutes[p]
-		free := slices.Contains(keySlotFree, p) || strings.HasPrefix(p, "GET ") || strings.HasPrefix(p, "OPTIONS ")
+		free := slices.Contains(keySlotFree, p) || strings.HasPrefix(p, "GET ") && !slices.Contains(keySlotGets, p) || strings.HasPrefix(p, "OPTIONS ")
 		if held == free {
 			t.Errorf("route %q is in neither keySlotRoutes nor keySlotFree, or in both: say whether a gateway key's MaxConcurrency holds it", p)
 		}
@@ -222,8 +229,16 @@ func TestKeyConcurrencyKeepsStreamAlive(t *testing.T) {
 		return res
 	}
 	first := post("first")
-	if line, _ := bufio.NewReader(first.Body).ReadString('\n'); !strings.Contains(line, "from first") {
-		t.Fatalf("first = %q", line)
+	// keepHeldAfter is 10ms here, so a slow first chunk (under -race on CI)
+	// can come after a ": keepalive" comment: the first data line is the one
+	// about the vendor's reply.
+	r := bufio.NewReader(first.Body)
+	line, err := r.ReadString('\n')
+	for err == nil && (strings.HasPrefix(line, ":") || strings.TrimSpace(line) == "") {
+		line, err = r.ReadString('\n')
+	}
+	if !strings.Contains(line, "from first") {
+		t.Fatalf("first = %q (%v)", line, err)
 	}
 	// the second has its headers while it waits, nothing sent upstream
 	second := post("second")
@@ -310,4 +325,56 @@ func TestKeyConcurrencyEager(t *testing.T) {
 	if len(s.KeyLanes()) != 0 {
 		t.Fatal("a GET took a slot")
 	}
+}
+
+// DeepSeek's chat page asks a model through the Messages route's tries,
+// called in process (chatInner): a turn there waits for its key's slot as
+// an agent's request does, and holds it while it asks.
+func TestKeyConcurrencyChatPage(t *testing.T) {
+	fresh(t)
+	v := &slowVendor{release: map[string]chan struct{}{}, quit: make(chan struct{})}
+	up := httptest.NewServer(v)
+	t.Cleanup(up.Close)
+	if err := provider.Save(provider.Provider{ID: "slow", Name: "Slow", Key: "k", Models: []string{"m"}, Chat: up.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	keys, secrets := newCaller(t, "Team")
+	keyCap(t, keys[0].ID, 1)
+	s := New()
+	gw := lanServer(t, s)
+	t.Cleanup(func() { close(v.quit) })
+	lane := func() Lane { return s.KeyLanes()[keys[0].ID] }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan struct{}, 2)
+	post := func(path, body string) {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			req, _ := http.NewRequestWithContext(ctx, "POST", gw.URL+path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+secrets[0])
+			req.AddCookie(&http.Cookie{Name: chatModelCookie, Value: "slow/m"})
+			if res, err := http.DefaultClient.Do(req); err == nil {
+				io.Copy(io.Discard, res.Body)
+				res.Body.Close()
+			}
+		}()
+	}
+	post("/v1/chat/completions", `{"model":"slow/m","stream":true,"messages":[{"role":"user","content":"a"}]}`)
+	within(t, "a at the vendor", func() bool { return len(v.seen()) == 1 })
+	post(ChatPagePath+"/anthropic/v1/messages", `{"model":"deepseek-flash","messages":[{"role":"user","content":"hi"}]}`)
+	within(t, "the chat page's turn waits for the key's slot", func() bool { return lane().Waiting == 1 })
+	if n := len(v.seen()); n != 1 {
+		t.Fatalf("the chat page reached the vendor with the key's one slot taken: %v", v.seen())
+	}
+	close(v.gate("a"))
+	within(t, "the chat page's turn at the vendor", func() bool { return len(v.seen()) == 2 })
+	if l := lane(); l.Busy != 1 || l.Waiting != 0 {
+		t.Fatalf("key lane while the chat page asks = %+v, want its one slot held", l)
+	}
+	cancel()
+	<-done
+	<-done
+	within(t, "every key slot given back", func() bool { return len(s.KeyLanes()) == 0 })
 }
